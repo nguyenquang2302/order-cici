@@ -38,6 +38,11 @@ class OrderController extends Controller
             })
             ->when($request->filled('payment_status'), function ($query) use ($request) {
                 $query->where('orders.payment_status', $request->payment_status);
+
+                // Tab Chưa thu tiền: không hiển thị đơn đã hủy.
+                if ($request->payment_status === 'unpaid') {
+                    $query->where('orders.status', '!=', 'cancelled');
+                }
             })
             ->orderByDesc('orders.created_at')
             ->paginate(20)

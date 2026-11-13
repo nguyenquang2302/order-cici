@@ -22,46 +22,15 @@ Route::post('/send-telegram', [CallOwnerController::class, 'send'])
     ->name('call-owner.send');
     
 Route::middleware([IdentifyPc::class])->group(function () {
-    Route::get('/dat-mon', function (Request $request) {
-        $pc = $request->attributes->get('current_pc');
-
-        $categories = Category::where('is_active', true)
-            ->with(['products' => function ($query) {
-                $query->where('is_active', true)
-                    ->orderBy('name')
-                    ->select([
-                    'id',
-                    'category_id',
-                    'name',
-                    'description',
-                    'unit',
-                    'selling_price',
-                    'image_path',
-                    'stock_quantity',
-                ]);
-            }])
-            ->orderBy('name')
-            ->get(['id', 'name', 'slug']);
-
-        return Inertia::render('Customer/Order', [
-            'pc' => $pc ? [
-                'id' => $pc->id,
-                'code' => $pc->code,
-                'name' => $pc->name,
-            ] : [
-                'id' => null,
-                'code' => 'DEV',
-                'name' => 'Máy kiểm tra',
-            ],
-            'categories' => $categories,
-        ]);
-
-    })->name('customer.order');
+    Route::get('/dat-mon', [CustomerOrderController::class, 'index'])
+        ->name('customer.order');
 
     Route::post('/dat-mon', [CustomerOrderController::class, 'store'])
-    ->name('customer.order.store');
-});
+        ->name('customer.order.store');
 
+    Route::post('/thanh-toan-gop', [CustomerOrderController::class, 'createGroupPayment'])
+    ->name('customer.order.group-payment');
+});
 
 // Khu vực nhân viên
 Route::middleware(['auth', 'admin'])->group(function () {

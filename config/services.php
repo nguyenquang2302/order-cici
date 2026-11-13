@@ -40,4 +40,12 @@ return [
     ],
 
     
+    'mb' => [
+        'payment_secret' => env('MB_PAYMENT_SECRET'),
+
+        'bank_bin' => env('MB_BANK_BIN'),
+        'account_number' => env('MB_ACCOUNT_NUMBER'),
+        'account_name' => env('MB_ACCOUNT_NAME'),
+    ],
+
 ];

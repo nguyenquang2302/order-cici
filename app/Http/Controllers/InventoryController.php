@@ -55,10 +55,7 @@ class InventoryController extends Controller
     /**
      * Nhập kho theo thùng.
      *
-     * Ví dụ:
-     * Coca-Cola: 24 lon/thùng
-     * Nhập 10 thùng
-     * Tồn kho tăng 240 lon.
+     * Giá vốn sản phẩm được tính theo bình quân gia quyền.
      */
     public function store(Request $request)
     {
@@ -79,7 +76,7 @@ class InventoryController extends Controller
                 abort(422, 'Sản phẩm không tồn tại hoặc đã ngừng kinh doanh.');
             }
 
-            // Số lon/chai trong một thùng.
+            // Số đơn vị bán lẻ trong một thùng.
             $unitsPerPackage = max(
                 1,
                 (int) ($product->units_per_package ?? 1)
@@ -88,24 +85,43 @@ class InventoryController extends Controller
             // Số thùng nhập.
             $packageQuantity = (int) $validated['package_quantity'];
 
-            // Tổng số lon/chai thực tế nhập kho.
+            // Tổng số đơn vị bán lẻ nhập kho.
             $totalQuantity = $packageQuantity * $unitsPerPackage;
 
             // Giá nhập một thùng.
             $packageCost = (float) $validated['package_cost'];
 
-            // Giá vốn của một lon/chai.
-            $unitCost = round(
-                $packageCost / $unitsPerPackage,
-                2
-            );
+            // Giá nhập thực tế của một đơn vị bán lẻ.
+            $unitCost = $packageCost / $unitsPerPackage;
 
-            // Cập nhật tồn kho.
+            // Tồn kho và giá vốn cũ.
+            $oldQuantity = (int) $product->stock_quantity;
+            $oldCost = (float) $product->cost_price;
+
+            // Tồn kho mới.
+            $newQuantity = $oldQuantity + $totalQuantity;
+
+            // Tính giá vốn bình quân gia quyền.
+            if ($oldQuantity > 0 && $newQuantity > 0) {
+                $newAverageCost = (
+                    ($oldQuantity * $oldCost)
+                    + ($totalQuantity * $unitCost)
+                ) / $newQuantity;
+            } else {
+                // Hết hàng hoặc tồn kho không dương:
+                // lấy giá nhập của lô hàng mới làm giá vốn.
+                $newAverageCost = $unitCost;
+            }
+
+            $newAverageCost = round($newAverageCost, 2);
+            $unitCost = round($unitCost, 2);
+
+            // Cập nhật tồn kho và giá vốn bình quân.
             DB::table('products')
                 ->where('id', $product->id)
                 ->update([
-                    'stock_quantity' => (int) $product->stock_quantity + $totalQuantity,
-                    'cost_price' => $unitCost,
+                    'stock_quantity' => $newQuantity,
+                    'cost_price' => $newAverageCost,
                     'updated_at' => now(),
                 ]);
 
@@ -116,7 +132,8 @@ class InventoryController extends Controller
                 $note .= ' - ' . $validated['note'];
             }
 
-            // Lưu lịch sử theo số lượng đơn vị bán lẻ.
+            // Lưu lịch sử theo giá nhập thực tế của lô hàng,
+            // không phải giá vốn bình quân mới.
             DB::table('inventory_transactions')->insert([
                 'product_id' => $product->id,
                 'created_by' => auth()->id(),
