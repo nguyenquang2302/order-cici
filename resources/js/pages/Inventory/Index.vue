@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { Head, router, useForm } from '@inertiajs/vue3';
-import { Package, Plus, X, Search, ArrowDownToLine, History } from '@lucide/vue';
+import { Package, Plus, X, Search, History } from '@lucide/vue';
 import AppLayout from '@/layouts/AppLayout.vue';
 
 interface Product {
@@ -9,6 +9,7 @@ interface Product {
     name: string;
     sku: string | null;
     unit: string;
+    units_per_package: number;
     stock_quantity: number;
     cost_price: string | number;
 }
@@ -41,10 +42,26 @@ const search = ref('');
 
 const form = useForm({
     product_id: '',
-    quantity: 1,
-    unit_cost: 0,
+    package_quantity: 1,
+    package_cost: 0,
     note: '',
 });
+
+const selectedProduct = computed(() =>
+    props.products.find(product => product.id === Number(form.product_id))
+);
+
+const unitsPerPackage = computed(() =>
+    Math.max(1, Number(selectedProduct.value?.units_per_package ?? 1))
+);
+
+const totalUnits = computed(() =>
+    Number(form.package_quantity || 0) * unitsPerPackage.value
+);
+
+const totalCost = computed(() =>
+    Number(form.package_quantity || 0) * Number(form.package_cost || 0)
+);
 
 const filteredProducts = computed(() => {
     const keyword = search.value.toLowerCase().trim();
@@ -60,7 +77,7 @@ const filteredProducts = computed(() => {
 const totalProducts = computed(() => props.products.length);
 
 const totalStock = computed(() =>
-    props.products.reduce((sum, product) => sum + product.stock_quantity, 0)
+    props.products.reduce((sum, product) => sum + Number(product.stock_quantity), 0)
 );
 
 const lowStockProducts = computed(() =>
@@ -69,24 +86,31 @@ const lowStockProducts = computed(() =>
 
 function openModal() {
     form.reset();
+    form.clearErrors();
     form.product_id = '';
-    form.quantity = 1;
-    form.unit_cost = 0;
+    form.package_quantity = 1;
+    form.package_cost = 0;
     showModal.value = true;
 }
 
 function selectProduct() {
-    const product = props.products.find(
-        item => item.id === Number(form.product_id)
-    );
+    const product = selectedProduct.value;
 
     if (product) {
-        form.unit_cost = Number(product.cost_price);
+        const packageSize = Math.max(1, Number(product.units_per_package ?? 1));
+
+        // Giá nhập mỗi thùng = giá vốn mỗi đơn vị x số đơn vị trong thùng.
+        form.package_cost = Number(product.cost_price) * packageSize;
+    } else {
+        form.package_cost = 0;
     }
+
+    form.clearErrors();
 }
 
 function submitForm() {
     form.post('/inventory', {
+        preserveScroll: true,
         onSuccess: () => {
             showModal.value = false;
             form.reset();
@@ -216,7 +240,7 @@ function formatDate(value: string) {
                             <th class="px-5 py-4">Thời gian</th>
                             <th class="px-5 py-4">Sản phẩm</th>
                             <th class="px-5 py-4">Số lượng</th>
-                            <th class="px-5 py-4">Giá nhập</th>
+                            <th class="px-5 py-4">Giá nhập / đơn vị</th>
                             <th class="px-5 py-4">Người nhập</th>
                             <th class="px-5 py-4">Ghi chú</th>
                         </tr>
@@ -268,7 +292,9 @@ function formatDate(value: string) {
                 <div class="mb-6 flex items-center justify-between">
                     <div>
                         <h2 class="text-lg font-bold">Nhập kho</h2>
-                        <p class="mt-1 text-sm text-zinc-400">Tạo phiếu nhập hàng mới.</p>
+                        <p class="mt-1 text-sm text-zinc-400">
+                            Nhập hàng theo thùng hoặc kiện.
+                        </p>
                     </div>
                     <button @click="showModal = false">
                         <X class="h-5 w-5 text-zinc-400" />
@@ -285,8 +311,12 @@ function formatDate(value: string) {
                             class="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-white"
                         >
                             <option value="" disabled>Chọn sản phẩm</option>
-                            <option v-for="product in products" :key="product.id" :value="String(product.id)">
-                                {{ product.name }} (Tồn: {{ product.stock_quantity }})
+                            <option
+                                v-for="product in products"
+                                :key="product.id"
+                                :value="String(product.id)"
+                            >
+                                {{ product.name }} (Tồn: {{ product.stock_quantity }} {{ product.unit }})
                             </option>
                         </select>
                         <p v-if="form.errors.product_id" class="mt-1 text-sm text-red-400">
@@ -294,32 +324,44 @@ function formatDate(value: string) {
                         </p>
                     </div>
 
-                    <div>
-                        <label class="mb-2 block text-sm text-zinc-300">Số lượng nhập *</label>
-                        <input
-                            v-model.number="form.quantity"
-                            type="number"
-                            min="1"
-                            required
-                            class="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-white"
-                        />
-                        <p v-if="form.errors.quantity" class="mt-1 text-sm text-red-400">
-                            {{ form.errors.quantity }}
+                    <div v-if="selectedProduct" class="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+                        <p class="text-sm text-zinc-400">Quy cách đóng gói</p>
+                        <p class="mt-1 font-semibold">
+                            1 thùng = {{ unitsPerPackage }} {{ selectedProduct.unit }}
                         </p>
                     </div>
 
                     <div>
-                        <label class="mb-2 block text-sm text-zinc-300">Giá nhập / đơn vị *</label>
+                        <label class="mb-2 block text-sm text-zinc-300">
+                            Số thùng nhập *
+                        </label>
                         <input
-                            v-model.number="form.unit_cost"
+                            v-model.number="form.package_quantity"
+                            type="number"
+                            min="1"
+                            step="1"
+                            required
+                            class="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-white"
+                        />
+                        <p v-if="form.errors.package_quantity" class="mt-1 text-sm text-red-400">
+                            {{ form.errors.package_quantity }}
+                        </p>
+                    </div>
+
+                    <div>
+                        <label class="mb-2 block text-sm text-zinc-300">
+                            Giá nhập / thùng *
+                        </label>
+                        <input
+                            v-model.number="form.package_cost"
                             type="number"
                             min="0"
                             step="100"
                             required
                             class="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-white"
                         />
-                        <p v-if="form.errors.unit_cost" class="mt-1 text-sm text-red-400">
-                            {{ form.errors.unit_cost }}
+                        <p v-if="form.errors.package_cost" class="mt-1 text-sm text-red-400">
+                            {{ form.errors.package_cost }}
                         </p>
                     </div>
 
@@ -332,11 +374,19 @@ function formatDate(value: string) {
                         />
                     </div>
 
-                    <div class="rounded-lg bg-zinc-950 p-4">
-                        <p class="text-sm text-zinc-400">Tổng tiền nhập dự kiến</p>
-                        <p class="mt-1 text-xl font-bold text-red-400">
-                            {{ formatMoney(form.quantity * form.unit_cost) }}
-                        </p>
+                    <div class="rounded-lg bg-zinc-950 p-4 space-y-2">
+                        <div class="flex justify-between text-sm">
+                            <span class="text-zinc-400">Tổng số lượng quy đổi</span>
+                            <span class="font-semibold">
+                                {{ totalUnits }} {{ selectedProduct?.unit ?? '' }}
+                            </span>
+                        </div>
+                        <div class="flex justify-between text-sm">
+                            <span class="text-zinc-400">Tổng tiền nhập dự kiến</span>
+                            <span class="text-xl font-bold text-red-400">
+                                {{ formatMoney(totalCost) }}
+                            </span>
+                        </div>
                     </div>
 
                     <div class="flex justify-end gap-3 pt-2">
@@ -349,7 +399,7 @@ function formatDate(value: string) {
                         </button>
                         <button
                             type="submit"
-                            :disabled="form.processing"
+                            :disabled="form.processing || !form.product_id"
                             class="rounded-lg bg-red-600 px-5 py-2 text-sm font-semibold hover:bg-red-700 disabled:opacity-50"
                         >
                             {{ form.processing ? 'Đang lưu...' : 'Xác nhận nhập kho' }}

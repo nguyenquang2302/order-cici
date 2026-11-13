@@ -11,9 +11,6 @@ use Inertia\Inertia;
 
 class ProductController extends Controller
 {
-    /**
-     * Danh sách sản phẩm.
-     */
     public function index(Request $request)
     {
         $products = Product::with('category')
@@ -45,9 +42,6 @@ class ProductController extends Controller
         ]);
     }
 
-    /**
-     * Thêm sản phẩm.
-     */
     public function store(Request $request)
     {
         $validated = $request->validate([
@@ -56,6 +50,7 @@ class ProductController extends Controller
             'name' => ['required', 'string', 'max:150'],
             'description' => ['nullable', 'string'],
             'unit' => ['required', 'string', 'max:30'],
+            'units_per_package' => ['required', 'integer', 'min:1', 'max:10000'],
             'cost_price' => ['required', 'numeric', 'min:0'],
             'selling_price' => ['required', 'numeric', 'min:0'],
             'stock_quantity' => ['required', 'integer', 'min:0'],
@@ -72,14 +67,15 @@ class ProductController extends Controller
 
         $validated['is_active'] = true;
 
-        Product::create($validated);
+        // forceFill để lưu cả units_per_package mà không phụ thuộc
+        // vào danh sách fillable hiện tại của Model.
+        $product = new Product();
+        $product->forceFill($validated);
+        $product->save();
 
         return back()->with('success', 'Đã thêm sản phẩm.');
     }
 
-    /**
-     * Cập nhật sản phẩm.
-     */
     public function update(Request $request, Product $product)
     {
         $validated = $request->validate([
@@ -93,6 +89,7 @@ class ProductController extends Controller
             'name' => ['required', 'string', 'max:150'],
             'description' => ['nullable', 'string'],
             'unit' => ['required', 'string', 'max:30'],
+            'units_per_package' => ['required', 'integer', 'min:1', 'max:10000'],
             'cost_price' => ['required', 'numeric', 'min:0'],
             'selling_price' => ['required', 'numeric', 'min:0'],
             'stock_quantity' => ['required', 'integer', 'min:0'],
@@ -111,14 +108,12 @@ class ProductController extends Controller
                 ->store('products', 'public');
         }
 
-        $product->update($validated);
+        $product->forceFill($validated);
+        $product->save();
 
         return back()->with('success', 'Đã cập nhật sản phẩm.');
     }
 
-    /**
-     * Ngừng bán hoặc mở bán lại sản phẩm.
-     */
     public function toggleStatus(Product $product)
     {
         $product->is_active = !$product->is_active;
@@ -131,9 +126,6 @@ class ProductController extends Controller
         return back()->with('success', $message);
     }
 
-    /**
-     * Xóa sản phẩm nếu chưa phát sinh giao dịch.
-     */
     public function destroy(Product $product)
     {
         if (

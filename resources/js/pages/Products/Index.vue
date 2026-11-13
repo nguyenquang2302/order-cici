@@ -1,3 +1,4 @@
+
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue';
 import { Head, router, useForm } from '@inertiajs/vue3';
@@ -24,6 +25,7 @@ type Product = {
     name: string;
     description: string | null;
     unit: string;
+    units_per_package: number;
     cost_price: string | number;
     selling_price: string | number;
     stock_quantity: number;
@@ -66,6 +68,7 @@ const form = useForm({
     name: '',
     description: '',
     unit: 'cái',
+    units_per_package: 1,
     cost_price: 0,
     selling_price: 0,
     stock_quantity: 0,
@@ -138,6 +141,7 @@ function openCreate() {
     form.clearErrors();
 
     form.unit = 'cái';
+    form.units_per_package = 1;
     form.low_stock_threshold = 5;
     form.image = null;
 
@@ -155,6 +159,7 @@ function openEdit(product: Product) {
     form.name = product.name;
     form.description = product.description ?? '';
     form.unit = product.unit;
+    form.units_per_package = product.units_per_package ?? 1;
     form.cost_price = Number(product.cost_price);
     form.selling_price = Number(product.selling_price);
     form.stock_quantity = product.stock_quantity;
@@ -378,6 +383,11 @@ onBeforeUnmount(() => {
                                         <p class="mt-1 text-xs text-muted-foreground">
                                             {{ product.sku || 'Chưa có SKU' }}
                                         </p>
+
+                                        <p class="mt-1 text-xs text-blue-400">
+                                            {{ product.units_per_package }}
+                                            {{ product.unit }}/thùng
+                                        </p>
                                     </div>
                                 </div>
                             </td>
@@ -519,7 +529,7 @@ onBeforeUnmount(() => {
                         </h2>
 
                         <p class="mt-1 text-xs text-muted-foreground">
-                            Nhập thông tin, hình ảnh và giá bán sản phẩm.
+                            Nhập thông tin, hình ảnh, giá bán và quy cách đóng thùng.
                         </p>
                     </div>
 
@@ -746,7 +756,7 @@ onBeforeUnmount(() => {
                         <!-- Unit -->
                         <div>
                             <label class="mb-1.5 block text-sm font-medium">
-                                Đơn vị *
+                                Đơn vị bán *
                             </label>
 
                             <input
@@ -761,6 +771,34 @@ onBeforeUnmount(() => {
                                 class="mt-1 text-xs text-red-500"
                             >
                                 {{ form.errors.unit }}
+                            </p>
+                        </div>
+
+                        <!-- Units per package -->
+                        <div>
+                            <label class="mb-1.5 block text-sm font-medium">
+                                Số {{ form.unit || 'đơn vị' }} trong 1 thùng *
+                            </label>
+
+                            <input
+                                v-model.number="form.units_per_package"
+                                type="number"
+                                min="1"
+                                max="10000"
+                                required
+                                class="w-full rounded-lg border border-border bg-background px-3 py-2.5"
+                            />
+
+                            <p class="mt-1 text-xs text-muted-foreground">
+                                Ví dụ: 24 lon/thùng hoặc 24 chai/thùng.
+                                Sản phẩm không đóng thùng thì nhập 1.
+                            </p>
+
+                            <p
+                                v-if="form.errors.units_per_package"
+                                class="mt-1 text-xs text-red-500"
+                            >
+                                {{ form.errors.units_per_package }}
                             </p>
                         </div>
 
@@ -783,6 +821,18 @@ onBeforeUnmount(() => {
                                 {{ form.errors.description }}
                             </p>
                         </div>
+                    </div>
+
+                    <!-- Package preview -->
+                    <div class="rounded-lg border border-border bg-secondary/30 p-4">
+                        <p class="text-sm font-semibold">
+                            Quy cách đóng thùng
+                        </p>
+
+                        <p class="mt-1 text-sm text-muted-foreground">
+                            1 thùng = {{ form.units_per_package || 1 }}
+                            {{ form.unit || 'đơn vị' }}
+                        </p>
                     </div>
 
                     <!-- Actions -->

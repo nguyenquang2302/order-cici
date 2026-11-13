@@ -4,11 +4,13 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Validator;
 use Inertia\Inertia;
 
 class InventoryController extends Controller
 {
+    /**
+     * Danh sách tồn kho và lịch sử nhập xuất.
+     */
     public function index()
     {
         $products = DB::table('products')
@@ -22,12 +24,12 @@ class InventoryController extends Controller
             ")
             ->orderBy('stock_quantity', 'asc')
             ->orderBy('name', 'asc')
-            ->orderBy('name')
             ->get([
                 'id',
                 'name',
                 'sku',
                 'unit',
+                'units_per_package',
                 'stock_quantity',
                 'cost_price',
             ]);
@@ -50,12 +52,20 @@ class InventoryController extends Controller
         ]);
     }
 
+    /**
+     * Nhập kho theo thùng.
+     *
+     * Ví dụ:
+     * Coca-Cola: 24 lon/thùng
+     * Nhập 10 thùng
+     * Tồn kho tăng 240 lon.
+     */
     public function store(Request $request)
     {
         $validated = $request->validate([
             'product_id' => ['required', 'exists:products,id'],
-            'quantity' => ['required', 'integer', 'min:1'],
-            'unit_cost' => ['required', 'numeric', 'min:0'],
+            'package_quantity' => ['required', 'integer', 'min:1'],
+            'package_cost' => ['required', 'numeric', 'min:0'],
             'note' => ['nullable', 'string', 'max:500'],
         ]);
 
@@ -69,21 +79,51 @@ class InventoryController extends Controller
                 abort(422, 'Sản phẩm không tồn tại hoặc đã ngừng kinh doanh.');
             }
 
+            // Số lon/chai trong một thùng.
+            $unitsPerPackage = max(
+                1,
+                (int) ($product->units_per_package ?? 1)
+            );
+
+            // Số thùng nhập.
+            $packageQuantity = (int) $validated['package_quantity'];
+
+            // Tổng số lon/chai thực tế nhập kho.
+            $totalQuantity = $packageQuantity * $unitsPerPackage;
+
+            // Giá nhập một thùng.
+            $packageCost = (float) $validated['package_cost'];
+
+            // Giá vốn của một lon/chai.
+            $unitCost = round(
+                $packageCost / $unitsPerPackage,
+                2
+            );
+
+            // Cập nhật tồn kho.
             DB::table('products')
                 ->where('id', $product->id)
                 ->update([
-                    'stock_quantity' => $product->stock_quantity + $validated['quantity'],
-                    'cost_price' => $validated['unit_cost'],
+                    'stock_quantity' => (int) $product->stock_quantity + $totalQuantity,
+                    'cost_price' => $unitCost,
                     'updated_at' => now(),
                 ]);
 
+            // Nội dung lịch sử nhập kho.
+            $note = "Nhập {$packageQuantity} thùng x {$unitsPerPackage} {$product->unit}/thùng";
+
+            if (!empty($validated['note'])) {
+                $note .= ' - ' . $validated['note'];
+            }
+
+            // Lưu lịch sử theo số lượng đơn vị bán lẻ.
             DB::table('inventory_transactions')->insert([
                 'product_id' => $product->id,
                 'created_by' => auth()->id(),
                 'type' => 'in',
-                'quantity' => $validated['quantity'],
-                'unit_cost' => $validated['unit_cost'],
-                'note' => $validated['note'] ?? 'Nhập kho',
+                'quantity' => $totalQuantity,
+                'unit_cost' => $unitCost,
+                'note' => $note,
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
