@@ -17,10 +17,21 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
+
+        // Middleware alias
         $middleware->alias([
             'admin' => EnsureAdmin::class,
         ]);
-        $middleware->encryptCookies(except: ['appearance', 'sidebar_state']);
+
+        // Exclude CSRF for Telegram endpoint
+        $middleware->validateCsrfTokens(except: [
+            'send-telegram',
+        ]);
+
+        $middleware->encryptCookies(except: [
+            'appearance',
+            'sidebar_state',
+        ]);
 
         $middleware->web(append: [
             HandleAppearance::class,
