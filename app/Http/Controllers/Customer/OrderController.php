@@ -298,10 +298,16 @@ class OrderController extends Controller
                 'integer',
                 'min:1',
             ],
+            'customer_name' => [
+                'nullable',
+                'string',
+                'max:100',
+            ],
             'note' => ['nullable', 'string', 'max:1000'],
         ], [
             'items.required' => 'Vui lòng chọn món trước khi gửi đơn.',
             'items.min' => 'Vui lòng chọn ít nhất một món.',
+            'customer_name.max' => 'Tên khách hàng không được quá 100 ký tự.',
         ]);
 
         $pc = $request->attributes->get('current_pc');
@@ -364,11 +370,15 @@ class OrderController extends Controller
                 STR_PAD_LEFT
             );
 
+            $customerName = isset($validated['customer_name'])
+                ? trim($validated['customer_name'])
+                : null;
+
             $orderId = DB::table('orders')->insertGetId([
                 'order_number' => $orderNumber,
                 'pc_id' => $pc->id ?? null,
                 'created_by' => null,
-                'customer_name' => null,
+                'customer_name' => $customerName ?: null,
                 'status' => 'pending',
                 'payment_status' => 'unpaid',
                 'payment_reference' => $paymentReference,
@@ -431,7 +441,7 @@ class OrderController extends Controller
             $order->payment_reference
         );
 
-        $this->sendTelegramNotification($order);
+        $this->sendTelegramNotification($order, $pc);
 
         return redirect()
             ->route('customer.order')
@@ -463,7 +473,7 @@ class OrderController extends Controller
     /**
      * Gửi thông báo Telegram.
      */
-    private function sendTelegramNotification($order): void
+    private function sendTelegramNotification($order, $pc = null): void
     {
         $botToken = config('services.telegram.bot_token');
         $chatId = config('services.telegram.chat_id');
@@ -474,17 +484,40 @@ class OrderController extends Controller
 
         $items = DB::table('order_items')
             ->where('order_id', $order->id)
+            ->orderBy('id')
             ->get();
 
         $message = "🛒 ĐƠN HÀNG MỚI - CICI GAMING\n\n";
-        $message .= "Mã đơn: {$order->order_number}\n";
-        $message .= "Mã thanh toán: {$order->payment_reference}\n";
 
-        $message .= "Tổng tiền: "
+        /*
+         * Thông tin máy khách.
+         */
+        $pcName = $pc?->name ?: 'Không xác định';
+        $pcCode = $pc?->code;
+
+        $message .= "🖥 Máy: {$pcName}";
+
+        if ($pcCode) {
+            $message .= " ({$pcCode})";
+        }
+
+        $message .= "\n";
+
+        /*
+         * Thông tin khách hàng.
+         */
+        $message .= "👤 Khách hàng: "
+            . ($order->customer_name ?: 'Chưa cung cấp')
+            . "\n\n";
+
+        $message .= "🧾 Mã đơn: {$order->order_number}\n";
+        $message .= "💳 Mã thanh toán: {$order->payment_reference}\n";
+
+        $message .= "💰 Tổng tiền: "
             . number_format((float) $order->total, 0, ',', '.')
             . "đ\n\n";
 
-        $message .= "Danh sách món:\n";
+        $message .= "📦 Danh sách món:\n";
 
         foreach ($items as $item) {
             $message .= "• {$item->product_name} x{$item->quantity}";
@@ -495,19 +528,29 @@ class OrderController extends Controller
         }
 
         if ($order->note) {
-            $message .= "\nGhi chú: {$order->note}";
+            $message .= "\n📝 Ghi chú: {$order->note}";
         }
 
         try {
-            Http::timeout(10)->post(
+            $response = Http::timeout(10)->post(
                 "https://api.telegram.org/bot{$botToken}/sendMessage",
                 [
                     'chat_id' => $chatId,
                     'text' => $message,
                 ]
             );
+
+            if (!$response->successful()) {
+                Log::warning('CiCi Telegram notification failed', [
+                    'order_id' => $order->id,
+                    'response' => $response->body(),
+                ]);
+            }
         } catch (\Throwable $e) {
-            report($e);
+            Log::error('CiCi Telegram notification exception', [
+                'order_id' => $order->id,
+                'message' => $e->getMessage(),
+            ]);
         }
     }
 }
