@@ -2,10 +2,12 @@
 
 namespace App\Http\Controllers\Customer;
 
+use App\Events\OrderCreated;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Inertia\Inertia;
 
@@ -32,12 +34,14 @@ class OrderController extends Controller
         $productsByCategory = $products->groupBy('category_id');
 
         foreach ($categories as $category) {
-            $category->products = $productsByCategory->get($category->id, collect());
+            $category->products = $productsByCategory->get(
+                $category->id,
+                collect()
+            );
         }
 
         /*
          * Lấy tất cả đơn chưa thanh toán của máy hiện tại.
-         * Mỗi đơn có mã chuyển khoản và QR riêng.
          */
         $orderQuery = DB::table('orders')
             ->where('payment_status', 'unpaid')
@@ -75,15 +79,27 @@ class OrderController extends Controller
             ];
         })->values();
 
-        // Chỉ hiển thị QR gộp nếu nhóm đó vẫn chứa đúng các đơn đang chờ hiện tại.
-        // Nếu khách đặt thêm đơn hoặc thanh toán riêng một đơn, QR cũ sẽ tự ẩn.
+        /*
+         * Chỉ hiển thị QR gộp nếu nhóm đó vẫn chứa đúng
+         * các đơn đang chờ hiện tại.
+         */
         $groupPayment = null;
+
         if ($pendingOrders->count() >= 2) {
-            $pendingIds = $pendingOrders->pluck('id')->map(fn ($id) => (int) $id)->sort()->values()->all();
+            $pendingIds = $pendingOrders
+                ->pluck('id')
+                ->map(fn ($id) => (int) $id)
+                ->sort()
+                ->values()
+                ->all();
 
             $candidateGroup = DB::table('payment_groups')
                 ->where('status', 'pending')
-                ->when($pc, fn ($query) => $query->where('pc_id', $pc->id), fn ($query) => $query->whereNull('pc_id'))
+                ->when(
+                    $pc,
+                    fn ($query) => $query->where('pc_id', $pc->id),
+                    fn ($query) => $query->whereNull('pc_id')
+                )
                 ->orderByDesc('id')
                 ->first();
 
@@ -111,6 +127,23 @@ class OrderController extends Controller
             }
         }
 
+        /*
+         * Kênh realtime riêng theo từng máy khách.
+         */
+        $channelId = $pc?->id ? (string) $pc->id : 'dev';
+
+        $channelKey = $pc?->id
+            ? 'pc:' . $pc->id
+            : 'pc:dev';
+
+        $channelToken = hash_hmac(
+            'sha256',
+            $channelKey,
+            (string) config('app.key')
+        );
+
+        $realtimeChannel = "pc.{$channelId}.{$channelToken}";
+
         return Inertia::render('Customer/Order', [
             'pc' => $pc ? [
                 'id' => $pc->id,
@@ -124,11 +157,12 @@ class OrderController extends Controller
             'categories' => $categories,
             'pendingOrders' => $pendingOrders,
             'groupPayment' => $groupPayment,
+            'realtimeChannel' => $realtimeChannel,
         ]);
     }
 
     /**
-     * Tạo một mã QR cho toàn bộ đơn chưa thanh toán của máy hiện tại.
+     * Tạo một mã QR cho toàn bộ đơn chưa thanh toán.
      */
     public function createGroupPayment(Request $request)
     {
@@ -145,7 +179,10 @@ class OrderController extends Controller
                 $ordersQuery->whereNull('pc_id');
             }
 
-            $orders = $ordersQuery->orderBy('id')->lockForUpdate()->get();
+            $orders = $ordersQuery
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get();
 
             if ($orders->count() < 2) {
                 throw \Illuminate\Validation\ValidationException::withMessages([
@@ -173,6 +210,7 @@ class OrderController extends Controller
                     'order_id' => $order->id,
                     'amount' => $remainingCents / 100,
                 ];
+
                 $totalCents += $remainingCents;
             }
 
@@ -182,7 +220,9 @@ class OrderController extends Controller
                 ]);
             }
 
-            // Mã nhóm dùng cùng định dạng CICI + 12 số để Node MB hiện tại nhận diện được.
+            /*
+             * Mã nhóm CICI + 12 số.
+             */
             do {
                 $reference = 'CICI' . str_pad(
                     (string) random_int(0, 999999999999),
@@ -194,12 +234,15 @@ class OrderController extends Controller
                 $existsInOrders = DB::table('orders')
                     ->where('payment_reference', $reference)
                     ->exists();
+
                 $existsInGroups = DB::table('payment_groups')
                     ->where('payment_reference', $reference)
                     ->exists();
+
             } while ($existsInOrders || $existsInGroups);
 
             $now = now();
+
             $groupId = DB::table('payment_groups')->insertGetId([
                 'payment_reference' => $reference,
                 'pc_id' => $pc->id ?? null,
@@ -210,6 +253,7 @@ class OrderController extends Controller
             ]);
 
             $rows = [];
+
             foreach ($allocations as $allocation) {
                 $rows[] = [
                     'payment_group_id' => $groupId,
@@ -222,12 +266,19 @@ class OrderController extends Controller
 
             DB::table('payment_group_orders')->insert($rows);
 
-            return DB::table('payment_groups')->where('id', $groupId)->first();
+            return DB::table('payment_groups')
+                ->where('id', $groupId)
+                ->first();
         });
 
         return redirect()
             ->route('customer.order')
-            ->with('success', 'Đã tạo QR thanh toán gộp ' . number_format((float) $group->total, 0, ',', '.') . 'đ.');
+            ->with(
+                'success',
+                'Đã tạo QR thanh toán gộp '
+                . number_format((float) $group->total, 0, ',', '.')
+                . 'đ.'
+            );
     }
 
     /**
@@ -237,8 +288,16 @@ class OrderController extends Controller
     {
         $validated = $request->validate([
             'items' => ['required', 'array', 'min:1'],
-            'items.*.product_id' => ['required', 'integer', 'exists:products,id'],
-            'items.*.quantity' => ['required', 'integer', 'min:1'],
+            'items.*.product_id' => [
+                'required',
+                'integer',
+                'exists:products,id',
+            ],
+            'items.*.quantity' => [
+                'required',
+                'integer',
+                'min:1',
+            ],
             'note' => ['nullable', 'string', 'max:1000'],
         ], [
             'items.required' => 'Vui lòng chọn món trước khi gửi đơn.',
@@ -248,11 +307,12 @@ class OrderController extends Controller
         $pc = $request->attributes->get('current_pc');
 
         $order = DB::transaction(function () use ($validated, $pc) {
-            // Cho phép tạo nhiều đơn độc lập trên cùng một máy.
-            // Mỗi lần gửi đơn sẽ sinh order_number và payment_reference riêng.
             $subtotal = 0;
             $orderItems = [];
 
+            /*
+             * Kiểm tra sản phẩm và tồn kho.
+             */
             foreach ($validated['items'] as $item) {
                 $product = DB::table('products')
                     ->where('id', $item['product_id'])
@@ -267,7 +327,9 @@ class OrderController extends Controller
 
                 if ($product->stock_quantity < $item['quantity']) {
                     throw \Illuminate\Validation\ValidationException::withMessages([
-                        'order' => 'Sản phẩm "' . $product->name . '" không đủ số lượng trong kho.',
+                        'order' => 'Sản phẩm "'
+                            . $product->name
+                            . '" không đủ số lượng trong kho.',
                     ]);
                 }
 
@@ -290,7 +352,10 @@ class OrderController extends Controller
                 ];
             }
 
-            $orderNumber = 'CICI-' . now()->format('YmdHis') . '-' . strtoupper(Str::random(4));
+            $orderNumber = 'CICI-'
+                . now()->format('YmdHis')
+                . '-'
+                . strtoupper(Str::random(4));
 
             $paymentReference = 'CICI' . str_pad(
                 (string) random_int(0, 999999999999),
@@ -319,6 +384,7 @@ class OrderController extends Controller
             foreach ($orderItems as &$item) {
                 $item['order_id'] = $orderId;
             }
+
             unset($item);
 
             DB::table('order_items')->insert($orderItems);
@@ -341,6 +407,25 @@ class OrderController extends Controller
                 ->first();
         });
 
+        /*
+         * Transaction đã commit thành công.
+         * Phát sự kiện để Admin nhận biết đơn hàng mới.
+         */
+        try {
+            event(new OrderCreated(
+                (int) $order->id,
+                (string) $order->order_number,
+                $order->pc_id !== null
+                    ? (int) $order->pc_id
+                    : null
+            ));
+        } catch (\Throwable $e) {
+            Log::warning('CiCi order created realtime failed', [
+                'order_id' => $order->id,
+                'message' => $e->getMessage(),
+            ]);
+        }
+
         $order->qr_url = $this->createQrUrl(
             (float) $order->total,
             $order->payment_reference
@@ -348,10 +433,6 @@ class OrderController extends Controller
 
         $this->sendTelegramNotification($order);
 
-        /*
-         * Chuyển về trang đặt món.
-         * index() sẽ lấy lại đơn từ database và hiển thị QR.
-         */
         return redirect()
             ->route('customer.order')
             ->with('success', 'Đã gửi đơn hàng ' . $order->order_number);
@@ -398,12 +479,19 @@ class OrderController extends Controller
         $message = "🛒 ĐƠN HÀNG MỚI - CICI GAMING\n\n";
         $message .= "Mã đơn: {$order->order_number}\n";
         $message .= "Mã thanh toán: {$order->payment_reference}\n";
-        $message .= "Tổng tiền: " . number_format((float) $order->total, 0, ',', '.') . "đ\n\n";
+
+        $message .= "Tổng tiền: "
+            . number_format((float) $order->total, 0, ',', '.')
+            . "đ\n\n";
+
         $message .= "Danh sách món:\n";
 
         foreach ($items as $item) {
             $message .= "• {$item->product_name} x{$item->quantity}";
-            $message .= " - " . number_format((float) $item->subtotal, 0, ',', '.') . "đ\n";
+
+            $message .= " - "
+                . number_format((float) $item->subtotal, 0, ',', '.')
+                . "đ\n";
         }
 
         if ($order->note) {

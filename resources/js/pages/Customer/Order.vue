@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { Head, router, useForm } from '@inertiajs/vue3';
+import { useEchoPublic } from '@laravel/echo-vue';
 import {
     ShoppingCart,
     Plus,
@@ -62,7 +63,18 @@ const props = defineProps<{
     categories: Category[];
     pendingOrders: PendingOrder[];
     groupPayment: GroupPayment | null;
+    realtimeChannel: string;
 }>();
+
+// Khi MB xác nhận thanh toán, cập nhật QR và danh sách đơn mà không cần F5.
+useEchoPublic(props.realtimeChannel, 'OrderPaymentUpdated', () => {
+    router.reload({
+        only: ['pendingOrders', 'groupPayment'],
+        preserveScroll: true,
+        preserveState: true,
+    });
+});
+
 const activeCategory = ref<number | null>(null);
 const cart = ref<CartItem[]>([]);
 const successMessage = ref('');
@@ -70,10 +82,6 @@ const mobileCartOpen = ref(false);
 const copiedMessage = ref('');
 const groupPaymentError = ref('');
 const groupPaymentProcessing = ref(false);
-const paymentDetailsOpen = ref(false);
-const pendingTotal = computed(() =>
-    props.pendingOrders.reduce((sum, order) => sum + Number(order.total), 0)
-);
 const form = useForm({
     items: [] as { product_id: number; quantity: number }[],
     note: '',
@@ -182,10 +190,7 @@ function submitOrder() {
 </script>
 <template>
     <Head title="Gọi món - CiCi Gaming" />
-    <div
-        class="min-h-screen bg-[#09090b] text-white"
-        :class="'pb-24'"
-    >
+    <div class="min-h-screen bg-[#09090b] text-white pb-24 lg:pb-0">
         <!-- Header -->
         <header class="sticky top-0 z-30 border-b border-zinc-800 bg-[#09090b]/95 backdrop-blur">
             <div class="mx-auto flex max-w-[1600px] items-center justify-between gap-3 px-4 py-4 lg:px-6">
@@ -211,45 +216,10 @@ function submitOrder() {
             </div>
         </header>
         <main class="mx-auto max-w-[1600px] px-4 py-6 lg:px-6">
-            <!-- Tóm tắt thanh toán dạng thẻ thu gọn -->
-            <section
-                v-if="pendingOrders.length >= 2"
-                class="mb-5 overflow-hidden rounded-xl border border-red-700/40 bg-zinc-900 shadow-lg"
-            >
-                <button
-                    type="button"
-                    @click="paymentDetailsOpen = !paymentDetailsOpen"
-                    :aria-expanded="paymentDetailsOpen"
-                    class="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-zinc-800/70"
-                >
-                    <div class="min-w-0">
-                        <div class="flex flex-wrap items-center gap-2">
-                            <span class="text-sm font-bold text-zinc-100">Thanh toán</span>
-                            <span class="rounded-full border border-yellow-600/40 bg-yellow-500/10 px-2 py-0.5 text-[10px] font-bold text-yellow-400">
-                                {{ pendingOrders.length }} đơn chưa trả
-                            </span>
-                        </div>
-                        <p class="mt-1 text-xl font-black leading-tight text-red-400">
-                            {{ formatMoney(pendingTotal) }}
-                        </p>
-                    </div>
-                    <span class="flex shrink-0 items-center gap-2 text-xs font-semibold text-zinc-300">
-                        {{ paymentDetailsOpen ? 'Ẩn chi tiết' : 'Xem chi tiết' }}
-                        <span
-                            class="text-lg leading-none transition-transform"
-                            :class="paymentDetailsOpen ? 'rotate-180' : ''"
-                            aria-hidden="true"
-                        >⌄</span>
-                    </span>
-                </button>
-            </section>
-
-            <template v-if="pendingOrders.length === 1 || paymentDetailsOpen">
             <!-- Thanh toán gộp tất cả đơn còn nợ -->
             <section
                 v-if="pendingOrders.length >= 2"
-                id="payment-section"
-                class="mb-6 scroll-mt-24 overflow-hidden rounded-2xl border border-emerald-700/50 bg-zinc-900 shadow-xl"
+                class="mb-6 overflow-hidden rounded-2xl border border-emerald-700/50 bg-zinc-900 shadow-xl"
             >
                 <div class="border-b border-zinc-800 bg-emerald-950/30 px-5 py-4">
                     <p class="text-xs font-bold uppercase tracking-wider text-emerald-400">
@@ -319,10 +289,9 @@ function submitOrder() {
 
             <!-- Đơn hàng đang chờ thanh toán -->
             <section
-                v-for="(pendingOrder, pendingIndex) in pendingOrders"
+                v-for="pendingOrder in pendingOrders"
                 :key="pendingOrder.id"
-                :id="pendingOrders.length < 2 && pendingIndex === 0 ? 'payment-section' : undefined"
-                class="mb-6 scroll-mt-24 overflow-hidden rounded-2xl border border-red-700/50 bg-zinc-900 shadow-xl"
+                class="mb-6 overflow-hidden rounded-2xl border border-red-700/50 bg-zinc-900 shadow-xl"
             >
                 <div class="border-b border-zinc-800 bg-red-950/30 px-4 py-2.5">
                     <div class="flex items-center justify-between gap-2">
@@ -438,7 +407,6 @@ function submitOrder() {
                     </div>
                 </div>
             </section>
-            </template>
             <!-- Thông báo thành công -->
             <div
                 v-if="successMessage"

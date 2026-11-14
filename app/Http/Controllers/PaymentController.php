@@ -2,8 +2,10 @@
 
 namespace App\Http\Controllers;
 
+use App\Events\OrderPaymentUpdated;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 
 class PaymentController extends Controller
@@ -37,7 +39,7 @@ class PaymentController extends Controller
                 ->where('status', 'completed')
                 ->sum('amount');
 
-            // Tính bằng đơn vị xu để tránh sai số số thực
+            // Tính bằng đơn vị xu để tránh sai số số thực.
             $totalCents = (int) round((float) $order->total * 100);
             $paidCents = (int) round((float) $paid * 100);
             $amountCents = (int) round((float) $validated['amount'] * 100);
@@ -81,6 +83,37 @@ class PaymentController extends Controller
                     'payment_status' => $paymentStatus,
                     'updated_at' => now(),
                 ]);
+
+            // Phát sự kiện sau khi dữ liệu thanh toán được commit.
+            $pcId = $order->pc_id !== null
+                ? (int) $order->pc_id
+                : null;
+
+            $channelId = $pcId !== null ? (string) $pcId : 'dev';
+            $channelKey = $pcId !== null ? 'pc:' . $pcId : 'pc:dev';
+
+            $channelToken = hash_hmac(
+                'sha256',
+                $channelKey,
+                (string) config('app.key')
+            );
+
+            $channelName = "pc.{$channelId}.{$channelToken}";
+
+            DB::afterCommit(function () use ($channelName, $id) {
+                try {
+                    event(new OrderPaymentUpdated(
+                        $channelName,
+                        [(int) $id]
+                    ));
+                } catch (\Throwable $e) {
+                    Log::warning('CiCi admin payment realtime failed', [
+                        'order_id' => $id,
+                        'channel' => $channelName,
+                        'message' => $e->getMessage(),
+                    ]);
+                }
+            });
         });
 
         return back()->with('success', 'Đã ghi nhận thanh toán.');

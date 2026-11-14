@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { Head, router, useForm } from '@inertiajs/vue3';
+import { useEchoPublic } from '@laravel/echo-vue';
 import {
     ShoppingCart,
     RefreshCw,
@@ -87,6 +88,22 @@ const props = defineProps<{
     pendingOrderCount: number;
     products: ManualOrderProduct[];
 }>();
+
+// ==========================================
+// REALTIME - NHẬN ĐƠN HÀNG MỚI
+// ==========================================
+
+useEchoPublic('admin.orders', 'OrderCreated', () => {
+    router.reload({
+        only: [
+            'orders',
+            'pendingItems',
+            'pendingOrderCount',
+        ],
+        preserveScroll: true,
+        preserveState: true,
+    });
+});
 
 // ==========================================
 // TẠO ĐƠN TẠI QUẦY

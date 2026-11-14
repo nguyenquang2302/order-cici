@@ -2,8 +2,10 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -39,7 +41,6 @@ class OrderController extends Controller
             ->when($request->filled('payment_status'), function ($query) use ($request) {
                 $query->where('orders.payment_status', $request->payment_status);
 
-                // Tab Chưa thu tiền: không hiển thị đơn đã hủy.
                 if ($request->payment_status === 'unpaid') {
                     $query->where('orders.status', '!=', 'cancelled');
                 }
@@ -50,14 +51,12 @@ class OrderController extends Controller
 
         $orderIds = $orders->getCollection()->pluck('id');
 
-        // Lấy danh sách món của từng đơn.
         $items = DB::table('order_items')
             ->whereIn('order_id', $orderIds)
             ->orderBy('id')
             ->get()
             ->groupBy('order_id');
 
-        // Lấy lịch sử thanh toán.
         $payments = DB::table('payments')
             ->whereIn('order_id', $orderIds)
             ->where('status', 'completed')
@@ -65,10 +64,8 @@ class OrderController extends Controller
             ->get()
             ->groupBy('order_id');
 
-        // Bổ sung dữ liệu cho từng đơn hàng.
         $orders->getCollection()->transform(function ($order) use ($items, $payments) {
             $order->items = $items->get($order->id, collect());
-
             $order->payments = $payments->get($order->id, collect());
 
             $order->paid_total = $order->payments->sum('amount');
@@ -81,9 +78,6 @@ class OrderController extends Controller
             return $order;
         });
 
-        // Tổng hợp sản phẩm trong tất cả đơn mới, chưa xác nhận.
-        // Hiển thị tên khách hàng đối với đơn tại quầy.
-        // Hiển thị mã máy đối với đơn đặt từ PC.
         $pendingItems = DB::table('order_items')
             ->join('orders', 'orders.id', '=', 'order_items.order_id')
             ->leftJoin('pcs', 'orders.pc_id', '=', 'pcs.id')
@@ -111,12 +105,10 @@ class OrderController extends Controller
             ->orderBy('order_items.product_name')
             ->get();
 
-        // Tổng số đơn mới.
         $pendingOrderCount = DB::table('orders')
             ->where('status', 'pending')
             ->count();
 
-        // Danh sách sản phẩm đang kinh doanh để tạo đơn tại quầy.
         $products = DB::table('products')
             ->where('is_active', true)
             ->orderBy('name')
@@ -208,7 +200,6 @@ class OrderController extends Controller
                 . '-'
                 . strtoupper(\Illuminate\Support\Str::random(4));
 
-            // Tạo đơn hàng tại quầy.
             $orderId = DB::table('orders')->insertGetId([
                 'order_number' => $orderNumber,
                 'pc_id' => null,
@@ -226,7 +217,6 @@ class OrderController extends Controller
                 'updated_at' => now(),
             ]);
 
-            // Lưu các sản phẩm trong đơn.
             foreach ($orderItems as &$item) {
                 $item['order_id'] = $orderId;
             }
@@ -290,12 +280,10 @@ class OrderController extends Controller
                     ]);
                 }
 
-                // Trừ tồn kho.
                 DB::table('products')
                     ->where('id', $product->id)
                     ->decrement('stock_quantity', $item->quantity);
 
-                // Ghi lịch sử xuất kho.
                 DB::table('inventory_transactions')->insert([
                     'product_id' => $product->id,
                     'created_by' => auth()->id(),
@@ -310,13 +298,17 @@ class OrderController extends Controller
                 ]);
             }
 
-            // Chuyển trạng thái khi toàn bộ sản phẩm đã trừ kho thành công.
             DB::table('orders')
                 ->where('id', $id)
                 ->update([
                     'status' => 'processing',
                     'updated_at' => now(),
                 ]);
+
+            $this->scheduleRealtimeUpdate(
+                $order->pc_id !== null ? (int) $order->pc_id : null,
+                (int) $order->id
+            );
         });
 
         return back()->with('success', 'Đã xác nhận đơn hàng và cập nhật tồn kho.');
@@ -343,7 +335,6 @@ class OrderController extends Controller
                 ]);
             }
 
-            // Hoàn thành trực tiếp từ đơn mới: phải trừ kho trước.
             if ($order->status === 'pending') {
                 $items = DB::table('order_items')
                     ->where('order_id', $id)
@@ -373,12 +364,10 @@ class OrderController extends Controller
                         ]);
                     }
 
-                    // Trừ kho.
                     DB::table('products')
                         ->where('id', $product->id)
                         ->decrement('stock_quantity', $item->quantity);
 
-                    // Ghi lịch sử xuất kho.
                     DB::table('inventory_transactions')->insert([
                         'product_id' => $product->id,
                         'created_by' => auth()->id(),
@@ -394,7 +383,6 @@ class OrderController extends Controller
                 }
             }
 
-            // Đơn processing đã trừ kho nên không trừ thêm lần nữa.
             DB::table('orders')
                 ->where('id', $id)
                 ->update([
@@ -402,6 +390,11 @@ class OrderController extends Controller
                     'completed_at' => now(),
                     'updated_at' => now(),
                 ]);
+
+            $this->scheduleRealtimeUpdate(
+                $order->pc_id !== null ? (int) $order->pc_id : null,
+                (int) $order->id
+            );
         });
 
         return back()->with('success', 'Đơn hàng đã hoàn thành và tồn kho đã được cập nhật.');
@@ -428,7 +421,6 @@ class OrderController extends Controller
                 ]);
             }
 
-            // Nếu đơn đang xử lý thì đã trừ kho, cần cộng trả lại.
             if ($order->status === 'processing') {
                 $items = DB::table('order_items')
                     ->where('order_id', $id)
@@ -469,8 +461,45 @@ class OrderController extends Controller
                 'status' => 'cancelled',
                 'updated_at' => now(),
             ]);
+
+            $this->scheduleRealtimeUpdate(
+                $order->pc_id !== null ? (int) $order->pc_id : null,
+                (int) $order->id
+            );
         });
 
         return back()->with('success', 'Đã hủy đơn hàng và cập nhật tồn kho.');
+    }
+
+    /**
+     * Phát sự kiện realtime sau khi transaction commit.
+     */
+    private function scheduleRealtimeUpdate(?int $pcId, int $orderId): void
+    {
+        $channelId = $pcId !== null ? (string) $pcId : 'dev';
+        $channelKey = $pcId !== null ? 'pc:' . $pcId : 'pc:dev';
+
+        $channelToken = hash_hmac(
+            'sha256',
+            $channelKey,
+            (string) config('app.key')
+        );
+
+        $channelName = "pc.{$channelId}.{$channelToken}";
+
+        DB::afterCommit(function () use ($channelName, $orderId): void {
+            try {
+                event(new \App\Events\OrderPaymentUpdated(
+                    $channelName,
+                    [$orderId]
+                ));
+            } catch (\Throwable $e) {
+                Log::warning('CiCi admin order realtime failed', [
+                    'order_id' => $orderId,
+                    'channel' => $channelName,
+                    'message' => $e->getMessage(),
+                ]);
+            }
+        });
     }
 }
