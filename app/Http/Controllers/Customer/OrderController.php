@@ -369,7 +369,7 @@ class OrderController extends Controller
             $order->payment_reference
         );
 
-        $this->sendTelegramNotification($order);
+        $this->sendTelegramNotification($order, $pc);
 
         /*
          * Chuyển về trang đặt món.
@@ -402,10 +402,12 @@ class OrderController extends Controller
         return "https://img.vietqr.io/image/{$bankBin}-{$accountNumber}-compact2.png?{$query}";
     }
 
+    
+
     /**
      * Gửi thông báo Telegram.
      */
-    private function sendTelegramNotification($order): void
+    private function sendTelegramNotification($order, $pc = null): void
     {
         $botToken = config('services.telegram.bot_token');
         $chatId = config('services.telegram.chat_id');
@@ -416,33 +418,103 @@ class OrderController extends Controller
 
         $items = DB::table('order_items')
             ->where('order_id', $order->id)
+            ->orderBy('id')
             ->get();
 
-        $message = "🛒 ĐƠN HÀNG MỚI - CICI GAMING\n\n";
-        $message .= "Mã đơn: {$order->order_number}\n";
-        $message .= "Mã thanh toán: {$order->payment_reference}\n";
-        $message .= "Tổng tiền: " . number_format((float) $order->total, 0, ',', '.') . "đ\n\n";
-        $message .= "Danh sách món:\n";
+        $esc = fn ($value) => htmlspecialchars(
+            (string) $value,
+            ENT_QUOTES | ENT_SUBSTITUTE,
+            'UTF-8'
+        );
 
-        foreach ($items as $item) {
-            $message .= "• {$item->product_name} x{$item->quantity}";
-            $message .= " - " . number_format((float) $item->subtotal, 0, ',', '.') . "đ\n";
+        $money = fn ($value) => number_format(
+            (float) $value,
+            0,
+            ',',
+            '.'
+        ) . 'đ';
+
+        $pcName = $pc->name ?? 'Khách tại quầy';
+        $pcCode = $pc->code ?? null;
+
+        // Tiêu đề
+        $message = "🛒 <b>CICI GAMING</b>\n";
+        $message .= "🔔 <b>CÓ ĐƠN HÀNG MỚI</b>\n\n";
+
+        // STT và mã đơn
+        $message .= "🔢 <b>STT đơn:</b> #" . (int) $order->id . "\n";
+        $message .= "🧾 <b>Mã đơn:</b>\n<code>" .
+            $esc($order->order_number) . "</code>\n\n";
+
+        // Thông tin máy
+        $message .= "🖥 <b>THÔNG TIN MÁY</b>\n";
+
+        if ($pcCode) {
+            $message .= "Tên máy: <b>" . $esc($pcName) . "</b>\n";
+            $message .= "Mã máy: <code>" . $esc($pcCode) . "</code>\n";
+        } else {
+            $message .= "Địa điểm: <b>" . $esc($pcName) . "</b>\n";
         }
+
+        $message .= "\n";
+
+        // Danh sách món
+        $message .= "🍽 <b>DANH SÁCH MÓN</b>\n";
+        $message .= "────────────────\n";
+
+        foreach ($items as $index => $item) {
+            $message .= "\n<b>" . ($index + 1) . ". " .
+                $esc($item->product_name) . "</b>\n";
+
+            $message .= "   SL: <b>x" . (int) $item->quantity . "</b>";
+            $message .= "  |  Giá: " . $money($item->unit_price) . "\n";
+
+            $message .= "   Thành tiền: <b>" .
+                $money($item->subtotal) . "</b>\n";
+        }
+
+        // Tổng tiền
+        $message .= "\n────────────────\n";
+        $message .= "💰 <b>TỔNG THANH TOÁN: " .
+            $money($order->total) . "</b>\n";
+
+        // Thanh toán và thời gian
+        $message .= "\n💳 Mã thanh toán:\n<code>" .
+            $esc($order->payment_reference) . "</code>\n";
+
+        $message .= "🕒 Thời gian: <b>" .
+            now('Asia/Ho_Chi_Minh')->format('H:i:s d/m/Y') .
+            "</b>\n";
 
         if ($order->note) {
-            $message .= "\nGhi chú: {$order->note}";
+            $message .= "\n📝 <b>GHI CHÚ</b>\n";
+            $message .= $esc($order->note) . "\n";
         }
 
+        $message .= "\n<i>CICI GAMING</i>";
+
         try {
-            Http::timeout(10)->post(
+            $response = Http::timeout(10)->post(
                 "https://api.telegram.org/bot{$botToken}/sendMessage",
                 [
                     'chat_id' => $chatId,
                     'text' => $message,
+                    'parse_mode' => 'HTML',
                 ]
             );
+
+            if (!$response->successful()) {
+                Log::warning('Telegram gửi thông báo đơn hàng thất bại', [
+                    'order_id' => $order->id,
+                    'response' => $response->body(),
+                ]);
+            }
         } catch (\Throwable $e) {
-            report($e);
+            Log::error('Telegram gửi thông báo đơn hàng lỗi', [
+                'order_id' => $order->id,
+                'error' => $e->getMessage(),
+            ]);
         }
     }
+
 }

@@ -957,13 +957,14 @@ function paymentMethodLabel(method: string) {
 
                                <div class="min-w-0">
 
-                                   <div class="flex flex-wrap items-center gap-1.5">
+                                    <div class="flex flex-wrap items-center gap-1.5">
+                                        <span class="rounded bg-red-950 px-1.5 py-0.5 text-[10px] font-black text-red-400">
+                                            STT: {{ order.id }}
+                                        </span>
 
-                                       <span class="text-xs font-bold text-white">
-
-                                           {{ order.order_number }}
-
-                                       </span>
+                                        <span class="text-xs font-bold text-white">
+                                            {{ order.order_number }}
+                                        </span>
 
                                        <span v-if="order.pc_id === null"
 
