@@ -18,19 +18,14 @@ class OrderPaymentUpdated implements ShouldBroadcastNow
     ) {
     }
 
-    /**
-     * Kênh broadcast công khai có tên được tạo bằng HMAC.
-     */
     public function broadcastOn(): array
     {
         return [
             new Channel($this->channelName),
+            new Channel('admin.orders'),
         ];
     }
 
-    /**
-     * Dữ liệu gửi đến trình duyệt.
-     */
     public function broadcastWith(): array
     {
         return [
