@@ -377,9 +377,21 @@ class OrderController extends Controller
     /**
      * Hoàn thành đơn hàng trực tiếp hoặc từ trạng thái đang xử lý.
      */
+    /**
+ * Hoàn thành đơn hàng trực tiếp hoặc từ trạng thái đang xử lý.
+ *
+ * Hỗ trợ:
+ * - Đơn có sản phẩm.
+ * - Đơn chỉ có yêu cầu nạp tiền.
+ * - Đơn vừa có sản phẩm vừa có yêu cầu nạp tiền.
+ *
+ * Không tự động xác nhận đã cộng tiền vào tài khoản máy.
+ */
     public function complete(int $id)
     {
-        DB::transaction(function () use ($id) {
+        $hasProducts = false;
+
+        DB::transaction(function () use ($id, &$hasProducts) {
             $order = DB::table('orders')
                 ->where('id', $id)
                 ->lockForUpdate()
@@ -395,17 +407,24 @@ class OrderController extends Controller
                 ]);
             }
 
+            $topupAmount = (float) ($order->topup_amount ?? 0);
+
+            // Chỉ xử lý kho khi đơn đang pending.
             if ($order->status === 'pending') {
                 $items = DB::table('order_items')
                     ->where('order_id', $id)
                     ->get();
 
-                if ($items->isEmpty()) {
+                $hasProducts = $items->isNotEmpty();
+
+                // Không có sản phẩm và cũng không có khoản nạp.
+                if (!$hasProducts && $topupAmount <= 0) {
                     throw ValidationException::withMessages([
-                        'order' => 'Đơn hàng không có sản phẩm.',
+                        'order' => 'Đơn hàng không có sản phẩm hoặc khoản nạp tiền.',
                     ]);
                 }
 
+                // Có sản phẩm thì mới kiểm tra và trừ kho.
                 foreach ($items as $item) {
                     $product = DB::table('products')
                         ->where('id', $item->product_id)
@@ -443,6 +462,7 @@ class OrderController extends Controller
                 }
             }
 
+            // Hoàn thành đơn hàng.
             DB::table('orders')
                 ->where('id', $id)
                 ->update([
@@ -457,7 +477,11 @@ class OrderController extends Controller
             );
         });
 
-        return back()->with('success', 'Đơn hàng đã hoàn thành và tồn kho đã được cập nhật.');
+        $message = $hasProducts
+            ? 'Đơn hàng đã hoàn thành và tồn kho đã được cập nhật.'
+            : 'Đơn hàng đã hoàn thành. Không phát sinh cập nhật tồn kho.';
+
+        return back()->with('success', $message);
     }
 
     /**
