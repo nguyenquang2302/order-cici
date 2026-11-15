@@ -18,6 +18,8 @@ import {
 interface DailyRevenue {
     date: string;
     revenue: number;
+    topup: number;
+    total_received: number;
     orders: number;
 }
 
@@ -34,6 +36,14 @@ interface CategoryStat {
     revenue: number;
 }
 
+interface TopupOrder {
+    id: number;
+    topup_amount: number;
+    topup_status: string | null;
+    completed_at: string | null;
+    topup_completed_at: string | null;
+}
+
 const props = defineProps<{
     filters: {
         start_date: string;
@@ -41,6 +51,10 @@ const props = defineProps<{
     };
     summary: {
         revenue: number;
+        topup_received: number;
+        total_received: number;
+        topup_pending: number;
+        topup_completed: number;
         profit: number;
         paid_orders: number;
         total_orders: number;
@@ -51,6 +65,7 @@ const props = defineProps<{
     dailyRevenue: DailyRevenue[];
     topProducts: TopProduct[];
     categoryStats: CategoryStat[];
+    topupOrders: TopupOrder[];
     inventory: {
         total_products: number;
         low_stock: number;
@@ -65,7 +80,12 @@ const filters = reactive({
 });
 
 const maxRevenue = computed(() =>
-    Math.max(...props.dailyRevenue.map(item => Number(item.revenue)), 1)
+    Math.max(
+        ...props.dailyRevenue.map(item =>
+            Number(item.revenue) + Number(item.topup)
+        ),
+        1
+    )
 );
 
 function applyFilters() {
@@ -76,8 +96,9 @@ function applyFilters() {
 }
 
 function resetFilters() {
-    filters.start_date = new Date().toLocaleDateString('en-CA');
-    filters.end_date = new Date().toLocaleDateString('en-CA');
+    const today = new Date().toLocaleDateString('en-CA');
+    filters.start_date = today;
+    filters.end_date = today;
     applyFilters();
 }
 
@@ -89,13 +110,39 @@ function money(value: number | string) {
     }).format(Number(value || 0));
 }
 
-function dateLabel(value: string) {
-    const date = new Date(value + 'T00:00:00');
+function dateLabel(value: string | null) {
+    if (!value) return '-';
+
+    const date = new Date(value.replace(' ', 'T'));
     return date.toLocaleDateString('vi-VN');
+}
+
+function dateTimeLabel(value: string | null) {
+    if (!value) return '-';
+
+    const date = new Date(value.replace(' ', 'T'));
+
+    return date.toLocaleString('vi-VN', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+    });
 }
 
 function barHeight(value: number | string) {
     return `${Math.max((Number(value) / maxRevenue.value) * 100, 2)}%`;
+}
+
+function topupStatusLabel(status: string | null) {
+    return status === 'completed' ? 'Đã xử lý' : 'Chờ xử lý';
+}
+
+function topupStatusClass(status: string | null) {
+    return status === 'completed'
+        ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+        : 'border-yellow-500/30 bg-yellow-500/10 text-yellow-400';
 }
 </script>
 
@@ -154,6 +201,7 @@ function barHeight(value: number | string) {
                 >
                     Hôm nay
                 </button>
+
                 <a
                     :href="`/reports/export?start_date=${encodeURIComponent(filters.start_date)}&end_date=${encodeURIComponent(filters.end_date)}`"
                     class="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-500"
@@ -161,6 +209,7 @@ function barHeight(value: number | string) {
                     <FileSpreadsheet class="h-4 w-4" />
                     Xuất Excel
                 </a>
+
                 <a
                     :href="`/reports/export-pdf?start_date=${encodeURIComponent(filters.start_date)}&end_date=${encodeURIComponent(filters.end_date)}`"
                     class="inline-flex items-center justify-center gap-2 rounded-lg bg-red-700 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-red-600"
@@ -171,31 +220,83 @@ function barHeight(value: number | string) {
             </div>
         </div>
 
-        <!-- Main statistics -->
+        <!-- Revenue summary -->
         <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <div class="rounded-xl border border-white/10 bg-[#151518] p-5">
+            <div class="rounded-xl border border-emerald-500/20 bg-[#151518] p-5">
                 <div class="flex items-center justify-between">
-                    <span class="text-sm text-zinc-400">Doanh thu thực thu</span>
-                    <Wallet class="h-5 w-5 text-emerald-400" />
+                    <span class="text-sm text-zinc-400">Doanh thu bán hàng</span>
+                    <ShoppingBag class="h-5 w-5 text-emerald-400" />
                 </div>
                 <div class="mt-3 text-2xl font-bold text-emerald-400">
                     {{ money(summary.revenue) }}
                 </div>
                 <p class="mt-2 text-xs text-zinc-500">
-                    Đơn hoàn thành và đã thanh toán
+                    Không bao gồm tiền nạp tài khoản
+                </p>
+            </div>
+
+            <div class="rounded-xl border border-purple-500/20 bg-[#151518] p-5">
+                <div class="flex items-center justify-between">
+                    <span class="text-sm text-zinc-400">Tiền nạp đã thu</span>
+                    <Wallet class="h-5 w-5 text-purple-400" />
+                </div>
+                <div class="mt-3 text-2xl font-bold text-purple-400">
+                    {{ money(summary.topup_received) }}
+                </div>
+                <p class="mt-2 text-xs text-zinc-500">
+                    Tiền nạp trong các đơn đã thanh toán
+                </p>
+            </div>
+
+            <div class="rounded-xl border border-blue-500/20 bg-[#151518] p-5">
+                <div class="flex items-center justify-between">
+                    <span class="text-sm text-zinc-400">Tổng tiền thực thu</span>
+                    <TrendingUp class="h-5 w-5 text-blue-400" />
+                </div>
+                <div class="mt-3 text-2xl font-bold text-blue-400">
+                    {{ money(summary.total_received) }}
+                </div>
+                <p class="mt-2 text-xs text-zinc-500">
+                    Bán hàng + tiền nạp
+                </p>
+            </div>
+
+            <div class="rounded-xl border border-yellow-500/20 bg-[#151518] p-5">
+                <div class="flex items-center justify-between">
+                    <span class="text-sm text-zinc-400">Nạp chờ xử lý</span>
+                    <AlertTriangle class="h-5 w-5 text-yellow-400" />
+                </div>
+                <div class="mt-3 text-2xl font-bold text-yellow-400">
+                    {{ money(summary.topup_pending) }}
+                </div>
+                <p class="mt-2 text-xs text-zinc-500">
+                    Nhân viên chưa xác nhận cộng tiền
                 </p>
             </div>
 
             <div class="rounded-xl border border-white/10 bg-[#151518] p-5">
                 <div class="flex items-center justify-between">
                     <span class="text-sm text-zinc-400">Lợi nhuận gộp</span>
-                    <TrendingUp class="h-5 w-5 text-blue-400" />
+                    <TrendingUp class="h-5 w-5 text-cyan-400" />
                 </div>
-                <div class="mt-3 text-2xl font-bold text-blue-400">
+                <div class="mt-3 text-2xl font-bold text-cyan-400">
                     {{ money(summary.profit) }}
                 </div>
                 <p class="mt-2 text-xs text-zinc-500">
-                    Doanh thu trừ giá vốn
+                    Lợi nhuận từ sản phẩm
+                </p>
+            </div>
+
+            <div class="rounded-xl border border-white/10 bg-[#151518] p-5">
+                <div class="flex items-center justify-between">
+                    <span class="text-sm text-zinc-400">Nạp đã xử lý</span>
+                    <CheckCircle class="h-5 w-5 text-emerald-400" />
+                </div>
+                <div class="mt-3 text-2xl font-bold text-emerald-400">
+                    {{ money(summary.topup_completed) }}
+                </div>
+                <p class="mt-2 text-xs text-zinc-500">
+                    Nhân viên đã xác nhận cộng tiền
                 </p>
             </div>
 
@@ -221,38 +322,72 @@ function barHeight(value: number | string) {
                     {{ summary.unpaid_orders }}
                 </div>
                 <p class="mt-2 text-xs text-zinc-500">
-                    Không tính vào doanh thu
+                    Không tính vào tiền thực thu
                 </p>
             </div>
         </div>
 
         <!-- Daily revenue chart -->
         <div class="rounded-xl border border-white/10 bg-[#151518] p-5">
-            <div class="mb-5 flex items-center justify-between">
+            <div class="mb-5 flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
                 <div>
-                    <h2 class="font-bold">Biểu đồ doanh thu</h2>
+                    <h2 class="font-bold">Biểu đồ doanh thu và tiền nạp</h2>
                     <p class="mt-1 text-xs text-zinc-500">
-                        Doanh thu theo ngày trong khoảng đã chọn
+                        So sánh doanh thu bán hàng và tiền nạp theo ngày
                     </p>
                 </div>
-                <TrendingUp class="h-5 w-5 text-red-400" />
+
+                <div class="flex flex-wrap gap-4 text-xs">
+                    <div class="flex items-center gap-2">
+                        <span class="h-2.5 w-2.5 rounded-sm bg-red-500"></span>
+                        Doanh thu bán hàng
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <span class="h-2.5 w-2.5 rounded-sm bg-purple-500"></span>
+                        Tiền nạp
+                    </div>
+                </div>
             </div>
 
             <div v-if="dailyRevenue.length" class="overflow-x-auto">
-                <div class="flex h-64 min-w-max items-end gap-3 border-b border-white/10 px-2">
+                <div class="flex h-72 min-w-max items-end gap-4 border-b border-white/10 px-2">
                     <div
                         v-for="item in dailyRevenue"
                         :key="item.date"
-                        class="flex h-full w-16 flex-col items-center justify-end gap-2"
+                        class="flex h-full w-24 flex-col items-center justify-end gap-2"
                     >
-                        <span class="text-[10px] text-zinc-400">
-                            {{ money(item.revenue) }}
-                        </span>
-                        <div
-                            class="w-9 rounded-t-md bg-gradient-to-t from-red-700 to-red-400 transition-all"
-                            :style="{ height: barHeight(item.revenue) }"
-                            :title="`${money(item.revenue)} - ${item.orders} đơn`"
-                        ></div>
+                        <div class="text-center text-[10px] text-zinc-400">
+                            <div>{{ money(item.total_received) }}</div>
+                            <div class="mt-0.5 text-zinc-600">
+                                {{ item.orders }} đơn
+                            </div>
+                        </div>
+
+                        <div class="flex h-48 w-12 items-end overflow-hidden rounded-t-md bg-white/5">
+                            <div
+                                class="flex w-full flex-col justify-end"
+                                :style="{
+                                    height: barHeight(
+                                        Number(item.revenue) + Number(item.topup)
+                                    )
+                                }"
+                                :title="`Bán hàng: ${money(item.revenue)} | Nạp: ${money(item.topup)}`"
+                            >
+                                <div
+                                    class="w-full bg-purple-500"
+                                    :style="{
+                                        height: `${Number(item.topup) / Math.max(Number(item.revenue) + Number(item.topup), 1) * 100}%`
+                                    }"
+                                ></div>
+                                <div
+                                    class="w-full bg-red-500"
+                                    :style="{
+                                        height: `${Number(item.revenue) / Math.max(Number(item.revenue) + Number(item.topup), 1) * 100}%`
+                                    }"
+                                ></div>
+                            </div>
+                        </div>
+
                         <span class="pb-2 text-[10px] text-zinc-400">
                             {{ dateLabel(item.date) }}
                         </span>
@@ -298,6 +433,75 @@ function barHeight(value: number | string) {
             </div>
         </div>
 
+        <!-- Top-up report -->
+        <div class="overflow-hidden rounded-xl border border-white/10 bg-[#151518]">
+            <div class="flex flex-col justify-between gap-2 border-b border-white/10 p-5 sm:flex-row sm:items-center">
+                <div>
+                    <h2 class="font-bold">Chi tiết nạp tài khoản</h2>
+                    <p class="mt-1 text-xs text-zinc-500">
+                        Các đơn đã thanh toán có phát sinh tiền nạp trong kỳ báo cáo
+                    </p>
+                </div>
+
+                <div class="text-sm font-semibold text-purple-400">
+                    Tổng nạp: {{ money(summary.topup_received) }}
+                </div>
+            </div>
+
+            <div class="overflow-x-auto">
+                <table class="w-full text-left text-sm">
+                    <thead class="bg-white/5 text-xs text-zinc-400">
+                        <tr>
+                            <th class="px-4 py-3">Mã đơn</th>
+                            <th class="px-4 py-3">Ngày thanh toán</th>
+                            <th class="px-4 py-3 text-right">Số tiền nạp</th>
+                            <th class="px-4 py-3 text-center">Trạng thái</th>
+                            <th class="px-4 py-3">Ngày xác nhận</th>
+                        </tr>
+                    </thead>
+
+                    <tbody>
+                        <tr
+                            v-for="order in topupOrders"
+                            :key="order.id"
+                            class="border-t border-white/5"
+                        >
+                            <td class="px-4 py-3 font-semibold">
+                                #{{ order.id }}
+                            </td>
+
+                            <td class="px-4 py-3 text-zinc-400">
+                                {{ dateTimeLabel(order.completed_at) }}
+                            </td>
+
+                            <td class="px-4 py-3 text-right font-bold text-purple-400">
+                                {{ money(order.topup_amount) }}
+                            </td>
+
+                            <td class="px-4 py-3 text-center">
+                                <span
+                                    class="inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold"
+                                    :class="topupStatusClass(order.topup_status)"
+                                >
+                                    {{ topupStatusLabel(order.topup_status) }}
+                                </span>
+                            </td>
+
+                            <td class="px-4 py-3 text-zinc-400">
+                                {{ dateTimeLabel(order.topup_completed_at) }}
+                            </td>
+                        </tr>
+
+                        <tr v-if="!topupOrders.length">
+                            <td colspan="5" class="px-4 py-8 text-center text-zinc-500">
+                                Không có đơn nạp tài khoản trong khoảng thời gian này.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
         <!-- Product and category reports -->
         <div class="grid grid-cols-1 gap-4 xl:grid-cols-2">
             <div class="overflow-hidden rounded-xl border border-white/10 bg-[#151518]">
@@ -317,6 +521,7 @@ function barHeight(value: number | string) {
                                 <th class="px-4 py-3 text-right">Doanh thu</th>
                             </tr>
                         </thead>
+
                         <tbody>
                             <tr
                                 v-for="(product, index) in topProducts"
@@ -327,13 +532,16 @@ function barHeight(value: number | string) {
                                     <span class="mr-2 text-zinc-500">{{ index + 1 }}.</span>
                                     {{ product.product_name }}
                                 </td>
+
                                 <td class="px-4 py-3 text-right">
                                     {{ product.quantity_sold }}
                                 </td>
+
                                 <td class="px-4 py-3 text-right font-semibold text-emerald-400">
                                     {{ money(product.revenue) }}
                                 </td>
                             </tr>
+
                             <tr v-if="!topProducts.length">
                                 <td colspan="3" class="px-4 py-8 text-center text-zinc-500">
                                     Chưa có dữ liệu sản phẩm.
@@ -348,7 +556,7 @@ function barHeight(value: number | string) {
                 <div class="border-b border-white/10 p-5">
                     <h2 class="font-bold">Doanh thu theo danh mục</h2>
                     <p class="mt-1 text-xs text-zinc-500">
-                        Thống kê sản phẩm đã bán
+                        Thống kê sản phẩm đã bán, không gồm tiền nạp
                     </p>
                 </div>
 
@@ -361,20 +569,26 @@ function barHeight(value: number | string) {
                                 <th class="px-4 py-3 text-right">Doanh thu</th>
                             </tr>
                         </thead>
+
                         <tbody>
                             <tr
                                 v-for="category in categoryStats"
                                 :key="category.category_name"
                                 class="border-t border-white/5"
                             >
-                                <td class="px-4 py-3">{{ category.category_name }}</td>
+                                <td class="px-4 py-3">
+                                    {{ category.category_name }}
+                                </td>
+
                                 <td class="px-4 py-3 text-right">
                                     {{ category.quantity_sold }}
                                 </td>
+
                                 <td class="px-4 py-3 text-right font-semibold text-emerald-400">
                                     {{ money(category.revenue) }}
                                 </td>
                             </tr>
+
                             <tr v-if="!categoryStats.length">
                                 <td colspan="3" class="px-4 py-8 text-center text-zinc-500">
                                     Chưa có dữ liệu danh mục.
@@ -397,7 +611,9 @@ function barHeight(value: number | string) {
                 <div class="rounded-lg bg-white/5 p-4">
                     <Package class="mb-2 h-5 w-5 text-blue-400" />
                     <p class="text-xs text-zinc-400">Sản phẩm đang kinh doanh</p>
-                    <p class="mt-2 text-2xl font-bold">{{ inventory.total_products }}</p>
+                    <p class="mt-2 text-2xl font-bold">
+                        {{ inventory.total_products }}
+                    </p>
                 </div>
 
                 <div class="rounded-lg bg-white/5 p-4">

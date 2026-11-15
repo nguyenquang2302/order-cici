@@ -32,6 +32,13 @@ class OrderController extends Controller
                 'orders.note',
                 'orders.created_at',
                 'orders.completed_at',
+
+                // Thông tin nạp tiền
+                'orders.topup_amount',
+                'orders.topup_status',
+                'orders.topup_completed_at',
+                'orders.topup_completed_by',
+
                 'pcs.code as pc_code',
                 'pcs.name as pc_name',
             ])
@@ -51,12 +58,14 @@ class OrderController extends Controller
 
         $orderIds = $orders->getCollection()->pluck('id');
 
+        // Chi tiết sản phẩm
         $items = DB::table('order_items')
             ->whereIn('order_id', $orderIds)
             ->orderBy('id')
             ->get()
             ->groupBy('order_id');
 
+        // Lịch sử thanh toán
         $payments = DB::table('payments')
             ->whereIn('order_id', $orderIds)
             ->where('status', 'completed')
@@ -64,7 +73,22 @@ class OrderController extends Controller
             ->get()
             ->groupBy('order_id');
 
-        $orders->getCollection()->transform(function ($order) use ($items, $payments) {
+        // Lấy tên nhân viên đã xác nhận nạp tiền
+        $topupStaffIds = $orders->getCollection()
+            ->pluck('topup_completed_by')
+            ->filter()
+            ->unique()
+            ->values();
+
+        $topupStaff = DB::table('users')
+            ->whereIn('id', $topupStaffIds)
+            ->pluck('name', 'id');
+
+        $orders->getCollection()->transform(function ($order) use (
+            $items,
+            $payments,
+            $topupStaff
+        ) {
             $order->items = $items->get($order->id, collect());
             $order->payments = $payments->get($order->id, collect());
 
@@ -75,9 +99,16 @@ class OrderController extends Controller
                 (float) $order->total - (float) $order->paid_total
             );
 
+            $order->topup_amount = $order->topup_amount ?? 0;
+
+            $order->topup_completed_by_name = $order->topup_completed_by
+                ? $topupStaff->get($order->topup_completed_by)
+                : null;
+
             return $order;
         });
 
+        // Tổng hợp món cần chuẩn bị
         $pendingItems = DB::table('order_items')
             ->join('orders', 'orders.id', '=', 'order_items.order_id')
             ->leftJoin('pcs', 'orders.pc_id', '=', 'pcs.id')
@@ -119,6 +150,15 @@ class OrderController extends Controller
                 'stock_quantity',
             ]);
 
+        // Danh sách máy
+        $pcs = DB::table('pcs')
+            ->orderBy('code')
+            ->get([
+                'id',
+                'code',
+                'name',
+            ]);
+
         return Inertia::render('Orders/Index', [
             'pendingItems' => $pendingItems,
             'pendingOrderCount' => $pendingOrderCount,
@@ -128,6 +168,7 @@ class OrderController extends Controller
                 'payment_status' => $request->payment_status,
             ],
             'products' => $products,
+            'pcs' => $pcs,
         ]);
     }
 
@@ -137,21 +178,26 @@ class OrderController extends Controller
     public function store(Request $request)
     {
         $validated = $request->validate([
+            'pc_id' => ['nullable', 'integer', 'exists:pcs,id'],
             'customer_name' => ['nullable', 'string', 'max:100'],
             'note' => ['nullable', 'string', 'max:1000'],
+
             'items' => ['required', 'array', 'min:1'],
+
             'items.*.product_id' => [
                 'required',
                 'integer',
                 'distinct',
                 'exists:products,id',
             ],
+
             'items.*.quantity' => [
                 'required',
                 'integer',
                 'min:1',
                 'max:999',
             ],
+
             'items.*.note' => ['nullable', 'string', 'max:255'],
         ], [
             'items.required' => 'Vui lòng chọn ít nhất một sản phẩm.',
@@ -202,16 +248,30 @@ class OrderController extends Controller
 
             $orderId = DB::table('orders')->insertGetId([
                 'order_number' => $orderNumber,
-                'pc_id' => null,
+
+                'pc_id' => !empty($validated['pc_id'])
+                    ? (int) $validated['pc_id']
+                    : null,
+
                 'created_by' => auth()->id(),
+
                 'customer_name' => !empty(trim($validated['customer_name'] ?? ''))
                     ? trim($validated['customer_name'])
                     : null,
+
                 'status' => 'pending',
                 'payment_status' => 'unpaid',
+
                 'subtotal' => $subtotal,
                 'discount' => 0,
                 'total' => $subtotal,
+
+                // Đơn tại quầy hiện tại không có khoản nạp
+                'topup_amount' => 0,
+                'topup_status' => 'not_required',
+                'topup_completed_at' => null,
+                'topup_completed_by' => null,
+
                 'note' => $validated['note'] ?? null,
                 'created_at' => now(),
                 'updated_at' => now(),
@@ -469,6 +529,80 @@ class OrderController extends Controller
         });
 
         return back()->with('success', 'Đã hủy đơn hàng và cập nhật tồn kho.');
+    }
+
+    /**
+     * Xác nhận đã nạp tiền thủ công cho khách.
+     *
+     * Chỉ ghi nhận trạng thái, nhân viên và thời gian.
+     * KHÔNG tự động cộng tiền vào tài khoản máy.
+     */
+    public function confirmTopup(int $id)
+    {
+        DB::transaction(function () use ($id) {
+            $order = DB::table('orders')
+                ->where('id', $id)
+                ->lockForUpdate()
+                ->first();
+
+            if (!$order) {
+                abort(404, 'Không tìm thấy đơn hàng.');
+            }
+
+            $topupAmount = (float) ($order->topup_amount ?? 0);
+
+            if ($topupAmount <= 0) {
+                throw ValidationException::withMessages([
+                    'topup' => 'Đơn hàng này không có khoản nạp tiền.',
+                ]);
+            }
+
+            if ($order->status === 'cancelled') {
+                throw ValidationException::withMessages([
+                    'topup' => 'Không thể xác nhận nạp tiền cho đơn đã hủy.',
+                ]);
+            }
+
+            if ($order->topup_status === 'completed') {
+                throw ValidationException::withMessages([
+                    'topup' => 'Khoản nạp này đã được xác nhận trước đó.',
+                ]);
+            }
+
+            // Kiểm tra lại số tiền thực thu từ các giao dịch thành công
+            $paidTotal = DB::table('payments')
+                ->where('order_id', $id)
+                ->where('status', 'completed')
+                ->sum('amount');
+
+            if (
+                $order->payment_status !== 'paid' ||
+                (float) $paidTotal < (float) $order->total
+            ) {
+                throw ValidationException::withMessages([
+                    'topup' => 'Đơn hàng chưa được thanh toán đủ. Không thể xác nhận nạp tiền.',
+                ]);
+            }
+
+            DB::table('orders')
+                ->where('id', $id)
+                ->update([
+                    'topup_status' => 'completed',
+                    'topup_completed_at' => now(),
+                    'topup_completed_by' => auth()->id(),
+                    'updated_at' => now(),
+                ]);
+
+            $this->scheduleRealtimeUpdate(
+                $order->pc_id !== null ? (int) $order->pc_id : null,
+                (int) $order->id
+            );
+        });
+
+        return back()->with(
+            'success',
+            'Đã ghi nhận nhân viên xác nhận nạp tiền thành công. Hệ thống không tự động cộng tiền vào tài khoản máy.'
+        );
     }
 
     /**

@@ -11,7 +11,6 @@ use PhpOffice\PhpSpreadsheet\Style\Fill;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 use Barryvdh\DomPDF\Facade\Pdf;
 
-
 class ReportController extends Controller
 {
     public function index(Request $request): Response
@@ -30,6 +29,7 @@ class ReportController extends Controller
             'topProducts' => $data['topProducts'],
             'categoryStats' => $data['categoryStats'],
             'inventory' => $data['inventory'],
+            'topupOrders' => $data['topupOrders'],
         ]);
     }
 
@@ -44,7 +44,7 @@ class ReportController extends Controller
         $spreadsheet->getProperties()
             ->setCreator('CiCi Gaming')
             ->setTitle('Báo cáo kinh doanh CiCi Gaming')
-            ->setSubject('Báo cáo doanh thu và tồn kho');
+            ->setSubject('Báo cáo doanh thu, nạp tài khoản và tồn kho');
 
         // SHEET 1: TỔNG QUAN
         $sheet = $spreadsheet->getActiveSheet();
@@ -58,7 +58,11 @@ class ReportController extends Controller
 
         $sheet->fromArray([
             ['Chỉ số', 'Giá trị'],
-            ['Doanh thu thực thu', $data['summary']['revenue']],
+            ['Doanh thu bán hàng', $data['summary']['revenue']],
+            ['Tiền nạp đã thu', $data['summary']['topup_received']],
+            ['Tổng tiền thực thu', $data['summary']['total_received']],
+            ['Tiền nạp chờ xử lý', $data['summary']['topup_pending']],
+            ['Tiền nạp đã xử lý', $data['summary']['topup_completed']],
             ['Lợi nhuận gộp', $data['summary']['profit']],
             ['Tổng đơn hàng', $data['summary']['total_orders']],
             ['Đơn hoàn thành', $data['summary']['completed_orders']],
@@ -72,15 +76,26 @@ class ReportController extends Controller
         ], null, 'A4');
 
         $this->styleHeader($sheet, 'A4:B4');
-        $sheet->getStyle('B5:B6')->getNumberFormat()->setFormatCode('#,##0" ₫"');
-        $sheet->getStyle('B15')->getNumberFormat()->setFormatCode('#,##0" ₫"');
+
+        // Định dạng tiền trong sheet tổng quan
+        foreach ([5, 6, 7, 8, 9, 10, 19] as $currencyRow) {
+            $sheet->getStyle('B' . $currencyRow)
+                ->getNumberFormat()
+                ->setFormatCode('#,##0" ₫"');
+        }
 
         // SHEET 2: DOANH THU THEO NGÀY
         $sheet = $spreadsheet->createSheet();
         $sheet->setTitle('Doanh thu theo ngày');
 
         $sheet->fromArray([
-            ['Ngày', 'Doanh thu', 'Số đơn'],
+            [
+                'Ngày',
+                'Doanh thu bán hàng',
+                'Tiền nạp',
+                'Tổng tiền thực thu',
+                'Số đơn',
+            ],
         ], null, 'A1');
 
         $row = 2;
@@ -90,6 +105,8 @@ class ReportController extends Controller
                 [
                     $item->date,
                     (float) $item->revenue,
+                    (float) $item->topup,
+                    (float) $item->total_received,
                     (int) $item->orders,
                 ],
             ], null, 'A' . $row);
@@ -97,10 +114,10 @@ class ReportController extends Controller
             $row++;
         }
 
-        $this->styleHeader($sheet, 'A1:C1');
+        $this->styleHeader($sheet, 'A1:E1');
 
         if ($row > 2) {
-            $sheet->getStyle('B2:B' . ($row - 1))
+            $sheet->getStyle('B2:D' . ($row - 1))
                 ->getNumberFormat()
                 ->setFormatCode('#,##0" ₫"');
         }
@@ -166,7 +183,49 @@ class ReportController extends Controller
                 ->setFormatCode('#,##0" ₫"');
         }
 
-        // SHEET 5: CHI TIẾT TỒN KHO
+        // SHEET 5: CHI TIẾT NẠP TÀI KHOẢN
+        $sheet = $spreadsheet->createSheet();
+        $sheet->setTitle('Nạp tài khoản');
+
+        $sheet->fromArray([
+            [
+                'Mã đơn',
+                'Ngày thanh toán',
+                'Số tiền nạp',
+                'Trạng thái nạp',
+                'Ngày xác nhận cộng tiền',
+            ],
+        ], null, 'A1');
+
+        $row = 2;
+
+        foreach ($data['topupOrders'] as $item) {
+            $statusLabel = $item->topup_status === 'completed'
+                ? 'Đã xử lý'
+                : 'Chờ xử lý';
+
+            $sheet->fromArray([
+                [
+                    $item->id,
+                    $item->completed_at,
+                    (float) $item->topup_amount,
+                    $statusLabel,
+                    $item->topup_completed_at,
+                ],
+            ], null, 'A' . $row);
+
+            $row++;
+        }
+
+        $this->styleHeader($sheet, 'A1:E1');
+
+        if ($row > 2) {
+            $sheet->getStyle('C2:C' . ($row - 1))
+                ->getNumberFormat()
+                ->setFormatCode('#,##0" ₫"');
+        }
+
+        // SHEET 6: CHI TIẾT TỒN KHO
         $sheet = $spreadsheet->createSheet();
         $sheet->setTitle('Tồn kho');
 
@@ -274,21 +333,57 @@ class ReportController extends Controller
 
     private function getReportData(string $startDate, string $endDate): array
     {
+        $startDateTime = $startDate . ' 00:00:00';
+        $endDateTime = $endDate . ' 23:59:59';
+
+        /*
+         * Chỉ lấy đơn đã hoàn thành và đã thanh toán.
+         * Ngày báo cáo được xác định theo completed_at,
+         * giống logic báo cáo hiện tại của hệ thống.
+         */
         $revenueQuery = DB::table('orders')
             ->where('status', 'completed')
             ->where('payment_status', 'paid')
             ->whereBetween('completed_at', [
-                $startDate . ' 00:00:00',
-                $endDate . ' 23:59:59',
+                $startDateTime,
+                $endDateTime,
             ]);
 
-        $revenue = (clone $revenueQuery)->sum('total');
+        // Doanh thu bán hàng = tổng đơn - tiền nạp
+        $revenue = (clone $revenueQuery)
+            ->selectRaw('COALESCE(SUM(total - COALESCE(topup_amount, 0)), 0) as revenue')
+            ->value('revenue');
+
+        // Tổng tiền nạp đã thu
+        $topupReceived = (clone $revenueQuery)
+            ->sum('topup_amount');
+
+        // Tổng tiền thực thu, bao gồm hàng hóa và tiền nạp
+        $totalReceived = (clone $revenueQuery)
+            ->sum('total');
+
         $paidOrders = (clone $revenueQuery)->count();
 
+        // Tiền nạp đã được nhân viên xác nhận cộng vào tài khoản
+        $topupCompleted = (clone $revenueQuery)
+            ->where('topup_amount', '>', 0)
+            ->where('topup_status', 'completed')
+            ->sum('topup_amount');
+
+        // Tiền nạp khách đã thanh toán nhưng nhân viên chưa xử lý
+        $topupPending = (clone $revenueQuery)
+            ->where('topup_amount', '>', 0)
+            ->where(function ($query) {
+                $query->whereNull('topup_status')
+                    ->orWhere('topup_status', '!=', 'completed');
+            })
+            ->sum('topup_amount');
+
+        // Thống kê đơn hàng theo ngày tạo
         $orderQuery = DB::table('orders')
             ->whereBetween('created_at', [
-                $startDate . ' 00:00:00',
-                $endDate . ' 23:59:59',
+                $startDateTime,
+                $endDateTime,
             ]);
 
         $totalOrders = (clone $orderQuery)->count();
@@ -306,30 +401,47 @@ class ReportController extends Controller
             ->where('status', '!=', 'cancelled')
             ->count();
 
+        // Lợi nhuận gộp chỉ tính sản phẩm, không tính tiền nạp
         $profit = DB::table('order_items')
             ->join('orders', 'orders.id', '=', 'order_items.order_id')
             ->where('orders.status', 'completed')
             ->where('orders.payment_status', 'paid')
             ->whereBetween('orders.completed_at', [
-                $startDate . ' 00:00:00',
-                $endDate . ' 23:59:59',
+                $startDateTime,
+                $endDateTime,
             ])
-            ->selectRaw('COALESCE(SUM((order_items.unit_price - order_items.cost_price) * order_items.quantity), 0) as profit')
+            ->selectRaw('
+                COALESCE(
+                    SUM(
+                        (order_items.unit_price - order_items.cost_price)
+                        * order_items.quantity
+                    ),
+                    0
+                ) as profit
+            ')
             ->value('profit');
 
+        // Doanh thu từng ngày: tách riêng hàng hóa và tiền nạp
         $dailyRevenue = (clone $revenueQuery)
-            ->selectRaw('DATE(completed_at) as date, SUM(total) as revenue, COUNT(*) as orders')
+            ->selectRaw('
+                DATE(completed_at) as date,
+                COALESCE(SUM(total - COALESCE(topup_amount, 0)), 0) as revenue,
+                COALESCE(SUM(topup_amount), 0) as topup,
+                COALESCE(SUM(total), 0) as total_received,
+                COUNT(*) as orders
+            ')
             ->groupByRaw('DATE(completed_at)')
             ->orderBy('date')
             ->get();
 
+        // Top sản phẩm bán chạy
         $topProducts = DB::table('order_items')
             ->join('orders', 'orders.id', '=', 'order_items.order_id')
             ->where('orders.status', 'completed')
             ->where('orders.payment_status', 'paid')
             ->whereBetween('orders.completed_at', [
-                $startDate . ' 00:00:00',
-                $endDate . ' 23:59:59',
+                $startDateTime,
+                $endDateTime,
             ])
             ->selectRaw('
                 order_items.product_id,
@@ -342,6 +454,7 @@ class ReportController extends Controller
             ->limit(10)
             ->get();
 
+        // Doanh thu theo danh mục
         $categoryStats = DB::table('order_items')
             ->join('orders', 'orders.id', '=', 'order_items.order_id')
             ->join('products', 'products.id', '=', 'order_items.product_id')
@@ -349,8 +462,8 @@ class ReportController extends Controller
             ->where('orders.status', 'completed')
             ->where('orders.payment_status', 'paid')
             ->whereBetween('orders.completed_at', [
-                $startDate . ' 00:00:00',
-                $endDate . ' 23:59:59',
+                $startDateTime,
+                $endDateTime,
             ])
             ->selectRaw("
                 COALESCE(categories.name, 'Chưa phân loại') as category_name,
@@ -361,6 +474,20 @@ class ReportController extends Controller
             ->orderByDesc('revenue')
             ->get();
 
+        // Danh sách đơn có nạp tài khoản
+        $topupOrders = (clone $revenueQuery)
+            ->where('topup_amount', '>', 0)
+            ->select([
+                'id',
+                'topup_amount',
+                'topup_status',
+                'completed_at',
+                'topup_completed_at',
+            ])
+            ->orderByDesc('completed_at')
+            ->get();
+
+        // Tồn kho hiện tại
         $inventoryQuery = DB::table('products')
             ->where('is_active', true);
 
@@ -383,6 +510,10 @@ class ReportController extends Controller
         return [
             'summary' => [
                 'revenue' => (float) $revenue,
+                'topup_received' => (float) $topupReceived,
+                'total_received' => (float) $totalReceived,
+                'topup_pending' => (float) $topupPending,
+                'topup_completed' => (float) $topupCompleted,
                 'profit' => (float) $profit,
                 'paid_orders' => $paidOrders,
                 'total_orders' => $totalOrders,
@@ -394,6 +525,7 @@ class ReportController extends Controller
             'topProducts' => $topProducts,
             'categoryStats' => $categoryStats,
             'inventory' => $inventory,
+            'topupOrders' => $topupOrders,
         ];
     }
 
@@ -422,6 +554,23 @@ class ReportController extends Controller
 
         $data = $this->getReportData($startDate, $endDate);
 
+        $inventoryProducts = DB::table('products')
+            ->leftJoin('categories', 'categories.id', '=', 'products.category_id')
+            ->where('products.is_active', true)
+            ->select([
+                'products.sku',
+                'products.name',
+                'categories.name as category_name',
+                'products.unit',
+                'products.stock_quantity',
+                'products.low_stock_threshold',
+                'products.cost_price',
+                'products.selling_price',
+            ])
+            ->orderBy('categories.name')
+            ->orderBy('products.name')
+            ->get();
+
         $pdf = Pdf::loadView('reports.pdf', [
             'startDate' => $startDate,
             'endDate' => $endDate,
@@ -430,22 +579,8 @@ class ReportController extends Controller
             'topProducts' => $data['topProducts'],
             'categoryStats' => $data['categoryStats'],
             'inventory' => $data['inventory'],
-            'inventoryProducts' => DB::table('products')
-                ->leftJoin('categories', 'categories.id', '=', 'products.category_id')
-                ->where('products.is_active', true)
-                ->select([
-                    'products.sku',
-                    'products.name',
-                    'categories.name as category_name',
-                    'products.unit',
-                    'products.stock_quantity',
-                    'products.low_stock_threshold',
-                    'products.cost_price',
-                    'products.selling_price',
-                ])
-                ->orderBy('categories.name')
-                ->orderBy('products.name')
-                ->get(),
+            'topupOrders' => $data['topupOrders'],
+            'inventoryProducts' => $inventoryProducts,
         ]);
 
         $pdf->setPaper('a4', 'landscape');

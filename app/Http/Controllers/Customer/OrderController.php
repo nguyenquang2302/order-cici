@@ -70,11 +70,16 @@ class OrderController extends Controller
                 'payment_method' => $order->payment_method,
                 'payment_status' => $order->payment_status,
                 'status' => $order->status,
+
+                'subtotal' => (float) $order->subtotal,
+                'topup_amount' => (float) ($order->topup_amount ?? 0),
                 'total' => (float) $order->total,
+
                 'qr_url' => $this->createQrUrl(
                     (float) $order->total,
                     $order->payment_reference
                 ),
+
                 'items' => $items,
             ];
         })->values();
@@ -118,6 +123,7 @@ class OrderController extends Controller
                         'payment_reference' => $candidateGroup->payment_reference,
                         'total' => (float) $candidateGroup->total,
                         'order_count' => count($groupOrderIds),
+
                         'qr_url' => $this->createQrUrl(
                             (float) $candidateGroup->total,
                             $candidateGroup->payment_reference
@@ -154,6 +160,7 @@ class OrderController extends Controller
                 'code' => 'DEV',
                 'name' => 'Máy thử nghiệm',
             ],
+
             'categories' => $categories,
             'pendingOrders' => $pendingOrders,
             'groupPayment' => $groupPayment,
@@ -194,13 +201,22 @@ class OrderController extends Controller
             $totalCents = 0;
 
             foreach ($orders as $order) {
+                /*
+                 * Tiền đã thanh toán của đơn.
+                 */
                 $paid = DB::table('payments')
                     ->where('order_id', $order->id)
                     ->where('status', 'completed')
                     ->sum('amount');
 
-                $remainingCents = (int) round((float) $order->total * 100)
-                    - (int) round((float) $paid * 100);
+                /*
+                 * order.total đã bao gồm tiền sản phẩm + tiền nạp.
+                 */
+                $remainingCents = (int) round(
+                    (float) $order->total * 100
+                ) - (int) round(
+                    (float) $paid * 100
+                );
 
                 if ($remainingCents <= 0) {
                     continue;
@@ -283,30 +299,59 @@ class OrderController extends Controller
 
     /**
      * Tạo đơn hàng.
+     *
+     * Có thể:
+     * - Chỉ gọi món.
+     * - Chỉ nạp tiền.
+     * - Vừa gọi món vừa nạp tiền.
      */
     public function store(Request $request)
     {
         $validated = $request->validate([
-            'items' => ['required', 'array', 'min:1'],
+            'items' => [
+                'nullable',
+                'array',
+            ],
+
             'items.*.product_id' => [
                 'required',
                 'integer',
                 'exists:products,id',
             ],
+
             'items.*.quantity' => [
                 'required',
                 'integer',
                 'min:1',
             ],
+
+            'topup_amount' => [
+                'nullable',
+                'integer',
+                'min:0',
+            ],
+
             'customer_name' => [
                 'nullable',
                 'string',
                 'max:100',
             ],
-            'note' => ['nullable', 'string', 'max:1000'],
+
+            'note' => [
+                'nullable',
+                'string',
+                'max:1000',
+            ],
         ], [
-            'items.required' => 'Vui lòng chọn món trước khi gửi đơn.',
-            'items.min' => 'Vui lòng chọn ít nhất một món.',
+            'items.array' => 'Danh sách sản phẩm không hợp lệ.',
+            'items.*.product_id.required' => 'Thiếu thông tin sản phẩm.',
+            'items.*.product_id.exists' => 'Sản phẩm không tồn tại.',
+            'items.*.quantity.required' => 'Vui lòng nhập số lượng.',
+            'items.*.quantity.min' => 'Số lượng sản phẩm phải lớn hơn 0.',
+
+            'topup_amount.integer' => 'Số tiền nạp phải là số nguyên.',
+            'topup_amount.min' => 'Số tiền nạp không được âm.',
+
             'customer_name.max' => 'Tên khách hàng không được quá 100 ký tự.',
         ]);
 
@@ -316,10 +361,26 @@ class OrderController extends Controller
             $subtotal = 0;
             $orderItems = [];
 
+            $items = $validated['items'] ?? [];
+
+            /*
+             * Tiền nạp.
+             */
+            $topupAmount = (int) ($validated['topup_amount'] ?? 0);
+
+            /*
+             * Phải có ít nhất sản phẩm hoặc tiền nạp.
+             */
+            if (empty($items) && $topupAmount <= 0) {
+                throw \Illuminate\Validation\ValidationException::withMessages([
+                    'order' => 'Vui lòng chọn món hoặc nhập số tiền muốn nạp.',
+                ]);
+            }
+
             /*
              * Kiểm tra sản phẩm và tồn kho.
              */
-            foreach ($validated['items'] as $item) {
+            foreach ($items as $item) {
                 $product = DB::table('products')
                     ->where('id', $item['product_id'])
                     ->lockForUpdate()
@@ -343,6 +404,9 @@ class OrderController extends Controller
                 $unitPrice = (float) $product->selling_price;
                 $lineTotal = $unitPrice * $quantity;
 
+                /*
+                 * Subtotal chỉ tính tiền sản phẩm.
+                 */
                 $subtotal += $lineTotal;
 
                 $orderItems[] = [
@@ -358,56 +422,102 @@ class OrderController extends Controller
                 ];
             }
 
+            /*
+             * Tổng thanh toán bao gồm cả tiền nạp.
+             */
+            $total = $subtotal + $topupAmount;
+
             $orderNumber = 'CICI-'
                 . now()->format('YmdHis')
                 . '-'
                 . strtoupper(Str::random(4));
 
-            $paymentReference = 'CICI' . str_pad(
-                (string) random_int(0, 999999999999),
-                12,
-                '0',
-                STR_PAD_LEFT
-            );
+            /*
+             * Sinh mã thanh toán không trùng.
+             */
+            do {
+                $paymentReference = 'CICI' . str_pad(
+                    (string) random_int(0, 999999999999),
+                    12,
+                    '0',
+                    STR_PAD_LEFT
+                );
+
+                $exists = DB::table('orders')
+                    ->where('payment_reference', $paymentReference)
+                    ->exists();
+
+                $groupExists = DB::table('payment_groups')
+                    ->where('payment_reference', $paymentReference)
+                    ->exists();
+
+            } while ($exists || $groupExists);
 
             $customerName = isset($validated['customer_name'])
                 ? trim($validated['customer_name'])
                 : null;
 
+            /*
+             * Lưu đơn hàng.
+             *
+             * subtotal     = tiền sản phẩm.
+             * topup_amount = tiền nạp.
+             * total        = subtotal + topup_amount.
+             */
             $orderId = DB::table('orders')->insertGetId([
                 'order_number' => $orderNumber,
                 'pc_id' => $pc->id ?? null,
                 'created_by' => null,
                 'customer_name' => $customerName ?: null,
+
                 'status' => 'pending',
                 'payment_status' => 'unpaid',
+
                 'payment_reference' => $paymentReference,
                 'payment_method' => 'mb_qr',
+
                 'subtotal' => $subtotal,
                 'discount' => 0,
-                'total' => $subtotal,
+
+                'topup_amount' => $topupAmount,
+                'total' => $total,
+
                 'note' => $validated['note'] ?? null,
+
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
 
-            foreach ($orderItems as &$item) {
-                $item['order_id'] = $orderId;
+            /*
+             * Lưu chi tiết sản phẩm.
+             * Nếu chỉ nạp tiền thì không có order_items.
+             */
+            if (!empty($orderItems)) {
+                foreach ($orderItems as &$item) {
+                    $item['order_id'] = $orderId;
+                }
+
+                unset($item);
+
+                DB::table('order_items')->insert($orderItems);
             }
 
-            unset($item);
-
-            DB::table('order_items')->insert($orderItems);
-
+            /*
+             * Tạo payment theo tổng tiền phải thanh toán.
+             */
             DB::table('payments')->insert([
                 'order_id' => $orderId,
                 'received_by' => null,
-                'amount' => $subtotal,
+                'amount' => $total,
                 'method' => 'mb_qr',
                 'status' => 'pending',
                 'transaction_code' => null,
                 'paid_at' => null,
-                'note' => 'Chờ thanh toán qua QR',
+
+                'note' => $topupAmount > 0
+                    ? 'Chờ thanh toán QR - Có tiền nạp tài khoản'
+                    : 'Chờ thanh toán qua QR',
+
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
@@ -445,7 +555,10 @@ class OrderController extends Controller
 
         return redirect()
             ->route('customer.order')
-            ->with('success', 'Đã gửi đơn hàng ' . $order->order_number);
+            ->with(
+                'success',
+                'Đã gửi đơn hàng ' . $order->order_number
+            );
     }
 
     /**
@@ -487,6 +600,9 @@ class OrderController extends Controller
             ->orderBy('id')
             ->get();
 
+        $topupAmount = (float) ($order->topup_amount ?? 0);
+        $subtotal = (float) $order->subtotal;
+
         $message = "🛒 ĐƠN HÀNG MỚI - CICI GAMING\n\n";
 
         /*
@@ -511,21 +627,53 @@ class OrderController extends Controller
             . "\n\n";
 
         $message .= "🧾 Mã đơn: {$order->order_number}\n";
-        $message .= "💳 Mã thanh toán: {$order->payment_reference}\n";
+        $message .= "💳 Mã thanh toán: {$order->payment_reference}\n\n";
 
-        $message .= "💰 Tổng tiền: "
-            . number_format((float) $order->total, 0, ',', '.')
-            . "đ\n\n";
+        /*
+         * Tiền sản phẩm.
+         */
+        $message .= "📦 DANH SÁCH MÓN:\n";
 
-        $message .= "📦 Danh sách món:\n";
+        if ($items->isEmpty()) {
+            $message .= "• Không có sản phẩm\n";
+        } else {
+            foreach ($items as $item) {
+                $message .= "• {$item->product_name} x{$item->quantity}";
 
-        foreach ($items as $item) {
-            $message .= "• {$item->product_name} x{$item->quantity}";
-
-            $message .= " - "
-                . number_format((float) $item->subtotal, 0, ',', '.')
-                . "đ\n";
+                $message .= " - "
+                    . number_format((float) $item->subtotal, 0, ',', '.')
+                    . "đ\n";
+            }
         }
+
+        $message .= "\n";
+
+        $message .= "🛍 Tiền sản phẩm: "
+            . number_format($subtotal, 0, ',', '.')
+            . "đ\n";
+
+        /*
+         * Tiền nạp được tách riêng.
+         * Nhân viên thực hiện nạp thủ công sau khi xác nhận.
+         */
+        if ($topupAmount > 0) {
+            $message .= "\n";
+            $message .= "💳 NẠP TIỀN TÀI KHOẢN\n";
+
+            $message .= "🖥 Máy nhận tiền: "
+                . ($pcCode ?: 'Không xác định')
+                . "\n";
+
+            $message .= "💰 Số tiền nạp: "
+                . number_format($topupAmount, 0, ',', '.')
+                . "đ\n";
+
+            $message .= "⚠️ Nhân viên cần xác nhận và nạp thủ công.\n";
+        }
+
+        $message .= "\n💵 TỔNG THANH TOÁN: "
+            . number_format((float) $order->total, 0, ',', '.')
+            . "đ\n";
 
         if ($order->note) {
             $message .= "\n📝 Ghi chú: {$order->note}";

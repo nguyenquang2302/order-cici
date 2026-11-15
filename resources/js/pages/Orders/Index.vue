@@ -11,11 +11,21 @@ import {
     XCircle,
 } from '@lucide/vue';
 
+// ==========================================
+// TYPES
+// ==========================================
+
 interface ManualOrderProduct {
     id: number;
     name: string;
     selling_price: number | string;
     stock_quantity: number;
+}
+
+interface ManualOrderPc {
+    id: number;
+    code: string;
+    name: string;
 }
 
 interface ManualOrderItem {
@@ -49,19 +59,33 @@ interface Order {
     pc_code: string | null;
     pc_name: string | null;
     customer_name: string | null;
+
     status: string;
     payment_status: string;
+
     subtotal: number | string;
     discount: number | string;
     total: number | string;
     paid_total: number | string;
     remaining: number | string;
+
+    // THÔNG TIN NẠP TIỀN
+    topup_amount: number | string;
+    topup_status: string | null;
+    topup_completed_at: string | null;
+    topup_completed_by_name?: string | null;
+
     note: string | null;
     created_at: string;
     completed_at: string | null;
+
     items: OrderItem[];
     payments: Payment[];
 }
+
+// ==========================================
+// PROPS
+// ==========================================
 
 const props = defineProps<{
     orders: {
@@ -75,22 +99,26 @@ const props = defineProps<{
             active: boolean;
         }[];
     };
+
     filters: {
         status: string | null;
         payment_status: string | null;
     };
+
     pendingItems: {
         product_id: number;
         product_name: string;
         total_quantity: number | string;
         customer_names: string | null;
     }[];
+
     pendingOrderCount: number;
     products: ManualOrderProduct[];
+    pcs: ManualOrderPc[];
 }>();
 
 // ==========================================
-// REALTIME - NHẬN ĐƠN HÀNG MỚI
+// REALTIME
 // ==========================================
 
 useEchoPublic('admin.orders', 'OrderCreated', () => {
@@ -113,6 +141,7 @@ const showManualOrderModal = ref(false);
 const productSearch = ref('');
 
 const manualOrderForm = useForm({
+    pc_id: null as number | null,
     customer_name: '',
     note: '',
     items: [] as ManualOrderItem[],
@@ -185,6 +214,7 @@ function submitManualOrder() {
 
     manualOrderForm.post('/orders/manual', {
         preserveScroll: true,
+
         onSuccess: () => {
             showManualOrderModal.value = false;
             manualOrderForm.reset();
@@ -195,6 +225,7 @@ function submitManualOrder() {
 
 function closeManualOrderModal() {
     if (manualOrderForm.processing) return;
+
     showManualOrderModal.value = false;
 }
 
@@ -251,7 +282,9 @@ function filterPaymentStatus(paymentStatus: string) {
 }
 
 function refreshOrders() {
-    router.reload({ preserveScroll: true });
+    router.reload({
+        preserveScroll: true,
+    });
 }
 
 // ==========================================
@@ -333,6 +366,78 @@ function payOrder(order: Order) {
 }
 
 // ==========================================
+// XÁC NHẬN ĐÃ NẠP TIỀN THỦ CÔNG
+// ==========================================
+
+function hasTopup(order: Order): boolean {
+    return Number(order.topup_amount || 0) > 0;
+}
+
+function isTopupCompleted(order: Order): boolean {
+    return order.topup_status === 'completed';
+}
+
+function canConfirmTopup(order: Order): boolean {
+    return (
+        hasTopup(order) &&
+        order.payment_status === 'paid' &&
+        order.status !== 'cancelled' &&
+        !isTopupCompleted(order)
+    );
+}
+
+function confirmTopup(order: Order) {
+    if (!canConfirmTopup(order)) {
+        alert('Đơn hàng chưa đủ điều kiện xác nhận nạp tiền.');
+        return;
+    }
+
+    const confirmed = window.confirm(
+        `Xác nhận đã nạp thủ công ${formatMoney(order.topup_amount)} ` +
+        `vào tài khoản máy/khách của đơn ${order.order_number}?\n\n` +
+        `Chỉ xác nhận nếu nhân viên đã thực sự cộng tiền trên phần mềm quản lý phòng máy.`
+    );
+
+    if (!confirmed) return;
+
+    router.post(`/orders/${order.id}/confirm-topup`, {}, {
+        preserveScroll: true,
+    });
+}
+
+function topupStatusLabel(order: Order): string {
+    if (!hasTopup(order)) {
+        return 'Không có nạp tiền';
+    }
+
+    if (isTopupCompleted(order)) {
+        return 'Đã nạp tiền';
+    }
+
+    if (order.payment_status !== 'paid') {
+        return 'Chờ khách thanh toán';
+    }
+
+    return 'Chờ nhân viên nạp';
+}
+
+function topupStatusClass(order: Order): string {
+    if (!hasTopup(order)) {
+        return 'border-zinc-700 bg-zinc-800 text-zinc-400';
+    }
+
+    if (isTopupCompleted(order)) {
+        return 'border-green-700 bg-green-950 text-green-400';
+    }
+
+    if (order.payment_status !== 'paid') {
+        return 'border-yellow-700 bg-yellow-950 text-yellow-400';
+    }
+
+    return 'border-orange-700 bg-orange-950 text-orange-400';
+}
+
+// ==========================================
 // HIỂN THỊ
 // ==========================================
 
@@ -344,6 +449,7 @@ function formatMoney(value: number | string | null | undefined) {
 
 function formatDate(value: string | null) {
     if (!value) return '-';
+
     return new Date(value).toLocaleString('vi-VN');
 }
 
@@ -384,6 +490,8 @@ function paymentStatusClass(status: string) {
 function paymentMethodLabel(method: string) {
     return {
         cash: 'Tiền mặt',
+        bank_transfer: 'Chuyển khoản',
+        qr: 'QR',
     }[method] || method;
 }
 </script>
@@ -402,20 +510,30 @@ function paymentMethodLabel(method: string) {
                     </div>
 
                     <div>
-                        <h1 class="text-xl font-black">QUẢN LÝ ĐƠN HÀNG</h1>
-                        <p class="text-xs text-zinc-500">CiCi Gaming</p>
+                        <h1 class="text-xl font-black">
+                            QUẢN LÝ ĐƠN HÀNG
+                        </h1>
+                        <p class="text-xs text-zinc-500">
+                            CiCi Gaming
+                        </p>
                     </div>
                 </div>
 
                 <div class="flex items-center gap-2">
-                    <button type="button" @click="showManualOrderModal = true"
-                        class="flex items-center gap-2 rounded-lg bg-red-600 px-3 py-2 text-xs font-bold hover:bg-red-700 sm:px-4 sm:text-sm">
+                    <button
+                        type="button"
+                        @click="showManualOrderModal = true"
+                        class="flex items-center gap-2 rounded-lg bg-red-600 px-3 py-2 text-xs font-bold hover:bg-red-700 sm:px-4 sm:text-sm"
+                    >
                         <ShoppingCart class="h-4 w-4" />
                         Tạo đơn tại quầy
                     </button>
 
-                    <button type="button" @click="refreshOrders"
-                        class="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs font-semibold hover:bg-zinc-800 sm:px-4 sm:text-sm">
+                    <button
+                        type="button"
+                        @click="refreshOrders"
+                        class="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs font-semibold hover:bg-zinc-800 sm:px-4 sm:text-sm"
+                    >
                         <RefreshCw class="h-4 w-4" />
                         Làm mới
                     </button>
@@ -439,10 +557,15 @@ function paymentMethodLabel(method: string) {
                     </span>
                 </div>
 
-                <div v-if="pendingItems.length"
-                    class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-                    <div v-for="item in pendingItems" :key="item.product_id"
-                        class="flex items-center justify-between gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2">
+                <div
+                    v-if="pendingItems.length"
+                    class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5"
+                >
+                    <div
+                        v-for="item in pendingItems"
+                        :key="item.product_id"
+                        class="flex items-center justify-between gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2"
+                    >
                         <div class="min-w-0">
                             <p class="truncate text-xs font-semibold text-zinc-200">
                                 {{ item.product_name }}
@@ -467,7 +590,9 @@ function paymentMethodLabel(method: string) {
             <div class="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
                 <div class="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2.5">
                     <p class="text-xs text-zinc-500">Tổng đơn</p>
-                    <p class="mt-1 text-xl font-black">{{ orders.total }}</p>
+                    <p class="mt-1 text-xl font-black">
+                        {{ orders.total }}
+                    </p>
                 </div>
 
                 <div class="rounded-lg border border-yellow-900/60 bg-zinc-900 px-3 py-2.5">
@@ -494,35 +619,43 @@ function paymentMethodLabel(method: string) {
 
             <!-- LỌC TRẠNG THÁI -->
             <div class="mb-2 flex flex-wrap gap-1.5">
-                <button v-for="status in statuses" :key="status.value"
+                <button
+                    v-for="status in statuses"
+                    :key="status.value"
                     @click="filterOrders(status.value)"
                     class="rounded-md border px-3 py-1.5 text-xs font-semibold transition"
                     :class="activeStatus === status.value
                         ? 'border-red-600 bg-red-600 text-white'
-                        : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-red-500 hover:text-white'">
+                        : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-red-500 hover:text-white'"
+                >
                     {{ status.label }}
                 </button>
             </div>
 
             <!-- LỌC THANH TOÁN -->
             <div class="mb-4 flex flex-wrap gap-1.5">
-                <button v-for="payment in paymentStatuses" :key="payment.value"
+                <button
+                    v-for="payment in paymentStatuses"
+                    :key="payment.value"
                     @click="filterPaymentStatus(payment.value)"
                     class="rounded-md border px-3 py-1.5 text-xs font-semibold transition"
                     :class="activePaymentStatus === payment.value
                         ? 'border-green-600 bg-green-700 text-white'
-                        : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-green-500 hover:text-white'">
+                        : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-green-500 hover:text-white'"
+                >
                     {{ payment.label }}
                 </button>
             </div>
 
             <!-- DANH SÁCH ĐƠN HÀNG -->
-            <div v-if="orders.data.length"
-                class="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900">
-
+            <div
+                v-if="orders.data.length"
+                class="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900"
+            >
                 <!-- HEADER BẢNG DESKTOP -->
                 <div
-                    class="hidden xl:grid xl:grid-cols-[32px_minmax(150px,1.3fr)_minmax(105px,0.85fr)_50px_90px_105px_75px_minmax(235px,auto)] items-center gap-2 border-b border-zinc-800 bg-zinc-950 px-3 py-2.5 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+                    class="hidden xl:grid xl:grid-cols-[32px_minmax(150px,1.3fr)_minmax(105px,0.85fr)_50px_90px_105px_75px_minmax(235px,auto)] items-center gap-2 border-b border-zinc-800 bg-zinc-950 px-3 py-2.5 text-[10px] font-bold uppercase tracking-wider text-zinc-500"
+                >
                     <span></span>
                     <span>Mã đơn / Khách</span>
                     <span>Thời gian</span>
@@ -534,16 +667,21 @@ function paymentMethodLabel(method: string) {
                 </div>
 
                 <div class="divide-y divide-zinc-800/80">
-                    <article v-for="order in orders.data" :key="order.id"
-                        class="transition hover:bg-zinc-800/20">
-
+                    <article
+                        v-for="order in orders.data"
+                        :key="order.id"
+                        class="transition hover:bg-zinc-800/20"
+                    >
                         <!-- DÒNG ĐƠN HÀNG -->
                         <div
-                            class="grid grid-cols-[28px_minmax(0,1fr)] gap-x-2 gap-y-2 px-3 py-2.5 xl:grid-cols-[32px_minmax(150px,1.3fr)_minmax(105px,0.85fr)_50px_90px_105px_75px_minmax(235px,auto)] xl:items-center xl:gap-2">
-
+                            class="grid grid-cols-[28px_minmax(0,1fr)] gap-x-2 gap-y-2 px-3 py-2.5 xl:grid-cols-[32px_minmax(150px,1.3fr)_minmax(105px,0.85fr)_50px_90px_105px_75px_minmax(235px,auto)] xl:items-center xl:gap-2"
+                        >
                             <!-- NÚT MỞ -->
-                            <button type="button" @click="toggleOrder(order.id)"
-                                class="flex h-7 w-7 items-center justify-center self-center rounded-md bg-zinc-800 text-sm font-black text-zinc-300 hover:bg-red-600 hover:text-white">
+                            <button
+                                type="button"
+                                @click="toggleOrder(order.id)"
+                                class="flex h-7 w-7 items-center justify-center self-center rounded-md bg-zinc-800 text-sm font-black text-zinc-300 hover:bg-red-600 hover:text-white"
+                            >
                                 {{ expandedOrders.includes(order.id) ? '−' : '+' }}
                             </button>
 
@@ -554,18 +692,51 @@ function paymentMethodLabel(method: string) {
                                         {{ order.order_number }}
                                     </span>
 
-                                    <span v-if="order.pc_id === null"
-                                        class="rounded bg-purple-950 px-1.5 py-0.5 text-[9px] font-bold text-purple-300">
+                                    <span
+                                        v-if="order.pc_id === null"
+                                        class="rounded bg-purple-950 px-1.5 py-0.5 text-[9px] font-bold text-purple-300"
+                                    >
                                         TẠI QUẦY
                                     </span>
                                 </div>
 
-                                <p class="mt-0.5 truncate text-[11px] text-zinc-500">
-                                    {{ order.pc_id === null
-                                        ? (order.customer_name || 'Khách tại quầy')
-                                        : (order.pc_code || order.pc_name || 'Máy khách')
-                                    }}
-                                </p>
+                                <div class="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                    <span
+                                        v-if="order.pc_id !== null"
+                                        class="inline-flex items-center gap-1 rounded-md border border-sky-500/50 bg-sky-500/15 px-2 py-1 text-[10px] font-extrabold text-sky-300"
+                                    >
+                                        <Monitor class="h-3 w-3" />
+                                        {{ order.pc_code || order.pc_name || 'Máy khách' }}
+                                    </span>
+
+                                    <span
+                                        v-else
+                                        class="inline-flex items-center gap-1 rounded-md border border-purple-500/50 bg-purple-500/15 px-2 py-1 text-[10px] font-extrabold text-purple-300"
+                                    >
+                                        TẠI QUẦY
+                                    </span>
+
+                                    <span
+                                        v-if="order.customer_name"
+                                        class="inline-flex items-center gap-1 rounded-md border border-emerald-500/50 bg-emerald-500/15 px-2 py-1 text-[10px] font-extrabold text-emerald-300"
+                                    >
+                                        👤 {{ order.customer_name }}
+                                    </span>
+                                </div>
+
+                                <!-- NHÃN NẠP TIỀN -->
+                                <div v-if="hasTopup(order)" class="mt-1.5">
+                                    <span
+                                        class="inline-flex flex-wrap items-center gap-1.5 rounded border px-2 py-0.5 text-[9px] font-bold"
+                                        :class="topupStatusClass(order)"
+                                    >
+                                        <span>NẠP: {{ topupStatusLabel(order) }}</span>
+
+                                        <span class="font-black text-white">
+                                            {{ formatMoney(order.topup_amount) }}
+                                        </span>
+                                    </span>
+                                </div>
                             </div>
 
                             <!-- THỜI GIAN -->
@@ -582,8 +753,10 @@ function paymentMethodLabel(method: string) {
 
                             <!-- TRẠNG THÁI -->
                             <div class="col-start-2 xl:col-auto">
-                                <span class="inline-flex whitespace-nowrap rounded border px-2 py-0.5 text-[10px] font-bold"
-                                    :class="statusClass(order.status)">
+                                <span
+                                    class="inline-flex whitespace-nowrap rounded border px-2 py-0.5 text-[10px] font-bold"
+                                    :class="statusClass(order.status)"
+                                >
                                     {{ statusLabel(order.status) }}
                                 </span>
                             </div>
@@ -600,43 +773,50 @@ function paymentMethodLabel(method: string) {
 
                             <!-- THANH TOÁN -->
                             <div class="col-start-2 xl:col-auto xl:text-center">
-                                <span class="whitespace-nowrap text-[10px] font-bold"
-                                    :class="paymentStatusClass(order.payment_status)">
+                                <span
+                                    class="whitespace-nowrap text-[10px] font-bold"
+                                    :class="paymentStatusClass(order.payment_status)"
+                                >
                                     {{ paymentStatusLabel(order.payment_status) }}
                                 </span>
                             </div>
 
                             <!-- THAO TÁC NHANH -->
-                            <div
-                                class="col-start-2 flex flex-nowrap items-center gap-1 xl:col-auto xl:justify-end">
-
-                                <button v-if="order.status === 'pending'"
+                            <div class="col-start-2 flex flex-nowrap items-center gap-1 xl:col-auto xl:justify-end">
+                                <button
+                                    v-if="order.status === 'pending'"
                                     type="button"
                                     @click="confirmOrder(order)"
-                                    class="shrink-0 whitespace-nowrap rounded bg-blue-700 px-2 py-1.5 text-[10px] font-bold text-white hover:bg-blue-600">
+                                    class="shrink-0 whitespace-nowrap rounded bg-blue-700 px-2 py-1.5 text-[10px] font-bold text-white hover:bg-blue-600"
+                                >
                                     Xác nhận
                                 </button>
 
-                                <button v-if="['pending', 'processing'].includes(order.status)"
+                                <button
+                                    v-if="['pending', 'processing'].includes(order.status)"
                                     type="button"
                                     @click="completeOrder(order)"
-                                    class="shrink-0 whitespace-nowrap rounded bg-indigo-700 px-2 py-1.5 text-[10px] font-bold text-white hover:bg-indigo-600">
+                                    class="shrink-0 whitespace-nowrap rounded bg-indigo-700 px-2 py-1.5 text-[10px] font-bold text-white hover:bg-indigo-600"
+                                >
                                     Hoàn thành
                                 </button>
 
-                                <button v-if="Number(order.remaining) > 0 && order.status !== 'cancelled'"
+                                <button
+                                    v-if="Number(order.remaining) > 0 && order.status !== 'cancelled'"
                                     type="button"
                                     @click="payOrder(order)"
-                                    class="shrink-0 whitespace-nowrap rounded bg-green-700 px-2 py-1.5 text-[10px] font-bold text-white hover:bg-green-600">
+                                    class="shrink-0 whitespace-nowrap rounded bg-green-700 px-2 py-1.5 text-[10px] font-bold text-white hover:bg-green-600"
+                                >
                                     Thu tiền
                                 </button>
                             </div>
                         </div>
 
                         <!-- CHI TIẾT MỞ RỘNG -->
-                        <div v-if="expandedOrders.includes(order.id)"
-                            class="border-t border-zinc-800 bg-[#111113] px-3 py-3 sm:px-4">
-
+                        <div
+                            v-if="expandedOrders.includes(order.id)"
+                            class="border-t border-zinc-800 bg-[#111113] px-3 py-3 sm:px-4"
+                        >
                             <div class="grid gap-4 lg:grid-cols-2">
 
                                 <!-- SẢN PHẨM -->
@@ -647,9 +827,11 @@ function paymentMethodLabel(method: string) {
                                     </div>
 
                                     <div class="overflow-hidden rounded-md border border-zinc-800">
-                                        <div v-for="item in order.items" :key="item.id"
-                                            class="flex items-center justify-between gap-3 border-b border-zinc-800/70 px-3 py-2 last:border-0">
-
+                                        <div
+                                            v-for="item in order.items"
+                                            :key="item.id"
+                                            class="flex items-center justify-between gap-3 border-b border-zinc-800/70 px-3 py-2 last:border-0"
+                                        >
                                             <div class="min-w-0">
                                                 <p class="text-xs font-semibold text-white">
                                                     {{ item.product_name }}
@@ -660,8 +842,10 @@ function paymentMethodLabel(method: string) {
                                                     × {{ item.quantity }}
                                                 </p>
 
-                                                <p v-if="item.note"
-                                                    class="mt-0.5 text-[10px] text-yellow-400">
+                                                <p
+                                                    v-if="item.note"
+                                                    class="mt-0.5 text-[10px] text-yellow-400"
+                                                >
                                                     Ghi chú: {{ item.note }}
                                                 </p>
                                             </div>
@@ -670,10 +854,19 @@ function paymentMethodLabel(method: string) {
                                                 {{ formatMoney(item.subtotal) }}
                                             </span>
                                         </div>
+
+                                        <div
+                                            v-if="order.items.length === 0"
+                                            class="px-3 py-4 text-center text-xs text-zinc-500"
+                                        >
+                                            Đơn hàng không có sản phẩm.
+                                        </div>
                                     </div>
 
-                                    <p v-if="order.note"
-                                        class="mt-2 rounded-md bg-yellow-950/30 p-2 text-[11px] text-yellow-300">
+                                    <p
+                                        v-if="order.note"
+                                        class="mt-2 rounded-md bg-yellow-950/30 p-2 text-[11px] text-yellow-300"
+                                    >
                                         Ghi chú đơn: {{ order.note }}
                                     </p>
                                 </div>
@@ -722,44 +915,147 @@ function paymentMethodLabel(method: string) {
                                         </div>
                                     </div>
 
-                                    <!-- THANH TOÁN -->
+                                    <!-- CHI TIẾT TIỀN HÀNG VÀ TIỀN NẠP -->
                                     <div class="rounded-md border border-zinc-800 p-3">
-                                        <div class="mb-2 flex items-center gap-2 text-xs font-bold text-zinc-300">
+                                        <div class="mb-3 flex items-center gap-2 text-xs font-bold text-zinc-300">
                                             <Wallet class="h-4 w-4 text-green-400" />
-                                            THANH TOÁN
+                                            CHI TIẾT THANH TOÁN
                                         </div>
 
-                                        <div class="space-y-1.5 text-xs">
+                                        <div class="space-y-2 text-xs">
                                             <div class="flex justify-between">
-                                                <span class="text-zinc-500">Tạm tính</span>
-                                                <span>{{ formatMoney(order.subtotal) }}</span>
+                                                <span class="text-zinc-500">
+                                                    Tiền sản phẩm
+                                                </span>
+                                                <span class="font-semibold text-white">
+                                                    {{ formatMoney(order.subtotal) }}
+                                                </span>
                                             </div>
 
                                             <div class="flex justify-between">
-                                                <span class="text-zinc-500">Giảm giá</span>
-                                                <span>{{ formatMoney(order.discount) }}</span>
+                                                <span class="text-zinc-500">
+                                                    Giảm giá
+                                                </span>
+                                                <span class="text-white">
+                                                    {{ formatMoney(order.discount) }}
+                                                </span>
+                                            </div>
+
+                                            <div
+                                                v-if="hasTopup(order)"
+                                                class="flex justify-between rounded-md border border-orange-800/50 bg-orange-950/20 p-2"
+                                            >
+                                                <span class="font-bold text-orange-300">
+                                                    Tiền nạp tài khoản
+                                                </span>
+                                                <span class="font-black text-orange-300">
+                                                    {{ formatMoney(order.topup_amount) }}
+                                                </span>
                                             </div>
 
                                             <div class="flex justify-between border-t border-zinc-800 pt-2">
-                                                <span class="font-bold text-zinc-300">Tổng tiền</span>
+                                                <span class="font-bold text-zinc-300">
+                                                    Tổng tiền phải trả
+                                                </span>
                                                 <span class="font-black text-white">
                                                     {{ formatMoney(order.total) }}
                                                 </span>
                                             </div>
 
                                             <div class="flex justify-between">
-                                                <span class="text-zinc-500">Đã thu</span>
+                                                <span class="text-zinc-500">
+                                                    Đã thu
+                                                </span>
                                                 <span class="font-bold text-green-400">
                                                     {{ formatMoney(order.paid_total) }}
                                                 </span>
                                             </div>
 
                                             <div class="flex justify-between">
-                                                <span class="text-zinc-500">Còn nợ</span>
+                                                <span class="text-zinc-500">
+                                                    Còn nợ
+                                                </span>
                                                 <span class="font-bold text-red-400">
                                                     {{ formatMoney(order.remaining) }}
                                                 </span>
                                             </div>
+                                        </div>
+                                    </div>
+
+                                    <!-- QUẢN LÝ NẠP TIỀN -->
+                                    <div
+                                        v-if="hasTopup(order)"
+                                        class="rounded-md border border-orange-800/60 bg-orange-950/10 p-3"
+                                    >
+                                        <div class="mb-3 flex items-center justify-between gap-2">
+                                            <p class="text-xs font-black text-orange-300">
+                                                QUẢN LÝ NẠP TÀI KHOẢN
+                                            </p>
+
+                                            <span
+                                                class="rounded border px-2 py-1 text-[10px] font-bold"
+                                                :class="topupStatusClass(order)"
+                                            >
+                                                {{ topupStatusLabel(order) }}
+                                            </span>
+                                        </div>
+
+                                        <div class="mb-3">
+                                            <p class="text-[11px] text-zinc-500">
+                                                Số tiền cần nạp
+                                            </p>
+                                            <p class="mt-1 text-xl font-black text-orange-300">
+                                                {{ formatMoney(order.topup_amount) }}
+                                            </p>
+                                        </div>
+
+                                        <div
+                                            v-if="order.payment_status !== 'paid'"
+                                            class="rounded-md border border-yellow-800/50 bg-yellow-950/20 p-2 text-[11px] text-yellow-300"
+                                        >
+                                            Khách chưa thanh toán đủ đơn hàng.
+                                            Chưa thể xác nhận nạp tiền.
+                                        </div>
+
+                                        <div
+                                            v-else-if="isTopupCompleted(order)"
+                                            class="rounded-md border border-green-800/50 bg-green-950/20 p-2"
+                                        >
+                                            <p class="text-xs font-bold text-green-400">
+                                                ĐÃ XÁC NHẬN NẠP TIỀN
+                                            </p>
+
+                                            <p class="mt-1 text-[11px] text-zinc-400">
+                                                Thời gian:
+                                                {{ formatDate(order.topup_completed_at) }}
+                                            </p>
+
+                                            <p
+                                                v-if="order.topup_completed_by_name"
+                                                class="mt-1 text-[11px] text-zinc-400"
+                                            >
+                                                Nhân viên:
+                                                {{ order.topup_completed_by_name }}
+                                            </p>
+                                        </div>
+
+                                        <div v-else>
+                                            <p class="mb-3 text-[11px] leading-relaxed text-orange-200">
+                                                Sau khi khách thanh toán thành công,
+                                                nhân viên cần tự cộng số tiền này vào
+                                                phần mềm quản lý phòng máy. Sau đó
+                                                bấm nút bên dưới để ghi nhận.
+                                            </p>
+
+                                            <button
+                                                v-if="canConfirmTopup(order)"
+                                                type="button"
+                                                @click="confirmTopup(order)"
+                                                class="flex w-full items-center justify-center gap-2 rounded-md bg-green-700 px-3 py-2.5 text-xs font-black text-white hover:bg-green-600"
+                                            >
+                                                <Wallet class="h-4 w-4" />
+                                                XÁC NHẬN ĐÃ NẠP TIỀN
+                                            </button>
                                         </div>
                                     </div>
 
@@ -769,11 +1065,15 @@ function paymentMethodLabel(method: string) {
                                             LỊCH SỬ GIAO DỊCH
                                         </p>
 
-                                        <div v-if="order.payments?.length" class="space-y-2">
-                                            <div v-for="payment in order.payments"
+                                        <div
+                                            v-if="order.payments?.length"
+                                            class="space-y-2"
+                                        >
+                                            <div
+                                                v-for="payment in order.payments"
                                                 :key="payment.id"
-                                                class="flex items-center justify-between gap-2 border-b border-zinc-800/70 pb-2 last:border-0 last:pb-0">
-
+                                                class="flex items-center justify-between gap-2 border-b border-zinc-800/70 pb-2 last:border-0 last:pb-0"
+                                            >
                                                 <div>
                                                     <p class="text-xs font-bold text-green-400">
                                                         {{ formatMoney(payment.amount) }}
@@ -784,8 +1084,10 @@ function paymentMethodLabel(method: string) {
                                                         · {{ formatDate(payment.paid_at) }}
                                                     </p>
 
-                                                    <p v-if="payment.note"
-                                                        class="text-[10px] text-zinc-400">
+                                                    <p
+                                                        v-if="payment.note"
+                                                        class="text-[10px] text-zinc-400"
+                                                    >
                                                         {{ payment.note }}
                                                     </p>
                                                 </div>
@@ -796,42 +1098,62 @@ function paymentMethodLabel(method: string) {
                                             </div>
                                         </div>
 
-                                        <p v-else class="text-[11px] text-zinc-500">
+                                        <p
+                                            v-else
+                                            class="text-[11px] text-zinc-500"
+                                        >
                                             Chưa có giao dịch thanh toán.
                                         </p>
                                     </div>
                                 </div>
                             </div>
 
-                            <!-- NÚT XỬ LÝ -->
+                            <!-- NÚT XỬ LÝ ĐƠN -->
                             <div class="mt-3 flex flex-wrap justify-end gap-2 border-t border-zinc-800 pt-3">
 
-                                <button v-if="Number(order.remaining) > 0 && order.status !== 'cancelled'"
+                                <button
+                                    v-if="Number(order.remaining) > 0 && order.status !== 'cancelled'"
                                     type="button"
                                     @click="payOrder(order)"
-                                    class="rounded-md bg-green-700 px-3 py-2 text-[11px] font-bold hover:bg-green-600">
+                                    class="rounded-md bg-green-700 px-3 py-2 text-[11px] font-bold hover:bg-green-600"
+                                >
                                     <Wallet class="mr-1 inline h-3.5 w-3.5" />
                                     THU TIỀN
                                 </button>
 
-                                <button v-if="order.status === 'pending'"
+                                <button
+                                    v-if="canConfirmTopup(order)"
+                                    type="button"
+                                    @click="confirmTopup(order)"
+                                    class="rounded-md bg-green-700 px-3 py-2 text-[11px] font-bold hover:bg-green-600"
+                                >
+                                    XÁC NHẬN ĐÃ NẠP
+                                </button>
+
+                                <button
+                                    v-if="order.status === 'pending'"
                                     type="button"
                                     @click="confirmOrder(order)"
-                                    class="rounded-md bg-blue-700 px-3 py-2 text-[11px] font-bold hover:bg-blue-600">
+                                    class="rounded-md bg-blue-700 px-3 py-2 text-[11px] font-bold hover:bg-blue-600"
+                                >
                                     XÁC NHẬN ĐƠN
                                 </button>
 
-                                <button v-if="['pending', 'processing'].includes(order.status)"
+                                <button
+                                    v-if="['pending', 'processing'].includes(order.status)"
                                     type="button"
                                     @click="completeOrder(order)"
-                                    class="rounded-md bg-blue-700 px-3 py-2 text-[11px] font-bold hover:bg-blue-600">
+                                    class="rounded-md bg-indigo-700 px-3 py-2 text-[11px] font-bold hover:bg-indigo-600"
+                                >
                                     HOÀN THÀNH
                                 </button>
 
-                                <button v-if="['pending', 'processing'].includes(order.status)"
+                                <button
+                                    v-if="['pending', 'processing'].includes(order.status)"
                                     type="button"
                                     @click="cancelOrder(order)"
-                                    class="rounded-md bg-red-800 px-3 py-2 text-[11px] font-bold hover:bg-red-700">
+                                    class="rounded-md bg-red-800 px-3 py-2 text-[11px] font-bold hover:bg-red-700"
+                                >
                                     <XCircle class="mr-1 inline h-3.5 w-3.5" />
                                     HỦY ĐƠN
                                 </button>
@@ -842,7 +1164,10 @@ function paymentMethodLabel(method: string) {
             </div>
 
             <!-- KHÔNG CÓ ĐƠN -->
-            <div v-else class="rounded-lg border border-zinc-800 bg-zinc-900 p-10 text-center">
+            <div
+                v-else
+                class="rounded-lg border border-zinc-800 bg-zinc-900 p-10 text-center"
+            >
                 <ShoppingCart class="mx-auto h-9 w-9 text-zinc-700" />
                 <p class="mt-3 text-sm font-bold text-zinc-300">
                     Chưa có đơn hàng nào
@@ -853,35 +1178,44 @@ function paymentMethodLabel(method: string) {
             </div>
 
             <!-- PHÂN TRANG -->
-            <div v-if="orders.last_page > 1"
-                class="mt-4 flex flex-wrap justify-center gap-1.5">
-
-                <template v-for="(link, index) in orders.links" :key="index">
-                    <button v-if="link.url"
+            <div
+                v-if="orders.last_page > 1"
+                class="mt-4 flex flex-wrap justify-center gap-1.5"
+            >
+                <template
+                    v-for="(link, index) in orders.links"
+                    :key="index"
+                >
+                    <button
+                        v-if="link.url"
                         type="button"
                         @click="router.visit(link.url, { preserveScroll: true })"
                         class="rounded-md border px-3 py-1.5 text-xs"
                         :class="link.active
                             ? 'border-red-600 bg-red-600 text-white'
                             : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:bg-zinc-800'"
-                        v-html="link.label" />
+                        v-html="link.label"
+                    />
 
-                    <span v-else
+                    <span
+                        v-else
                         class="rounded-md border border-zinc-800 px-3 py-1.5 text-xs text-zinc-600"
-                        v-html="link.label" />
+                        v-html="link.label"
+                    />
                 </template>
             </div>
         </div>
     </div>
 
     <!-- MODAL TẠO ĐƠN TẠI QUẦY -->
-    <div v-if="showManualOrderModal"
+    <div
+        v-if="showManualOrderModal"
         class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-3 sm:p-5"
-        @click.self="closeManualOrderModal">
-
+        @click.self="closeManualOrderModal"
+    >
         <div
-            class="flex max-h-[95vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-zinc-700 bg-[#151515] shadow-2xl">
-
+            class="flex max-h-[95vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-zinc-700 bg-[#151515] shadow-2xl"
+        >
             <!-- HEADER MODAL -->
             <div class="flex items-center justify-between border-b border-zinc-800 p-4">
                 <div>
@@ -900,10 +1234,12 @@ function paymentMethodLabel(method: string) {
                     </p>
                 </div>
 
-                <button type="button"
+                <button
+                    type="button"
                     @click="closeManualOrderModal"
                     :disabled="manualOrderForm.processing"
-                    class="rounded-lg p-2 text-zinc-400 hover:bg-zinc-800 hover:text-white disabled:opacity-50">
+                    class="rounded-lg p-2 text-zinc-400 hover:bg-zinc-800 hover:text-white disabled:opacity-50"
+                >
                     <XCircle class="h-6 w-6" />
                 </button>
             </div>
@@ -923,18 +1259,21 @@ function paymentMethodLabel(method: string) {
                         </span>
                     </div>
 
-                    <input v-model="productSearch"
+                    <input
+                        v-model="productSearch"
                         type="text"
                         placeholder="Tìm tên sản phẩm..."
-                        class="w-full rounded-lg border border-zinc-700 bg-[#202020] px-3 py-2.5 text-sm text-white placeholder-zinc-500 focus:border-red-500 focus:outline-none" />
+                        class="w-full rounded-lg border border-zinc-700 bg-[#202020] px-3 py-2.5 text-sm text-white placeholder-zinc-500 focus:border-red-500 focus:outline-none"
+                    />
 
                     <div class="max-h-[420px] space-y-2 overflow-y-auto pr-1">
-                        <button v-for="product in filteredManualProducts"
+                        <button
+                            v-for="product in filteredManualProducts"
                             :key="product.id"
                             type="button"
                             @click="addManualProduct(product)"
-                            class="flex w-full items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-[#202020] p-3 text-left transition hover:border-red-500 hover:bg-red-950/20">
-
+                            class="flex w-full items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-[#202020] p-3 text-left transition hover:border-red-500 hover:bg-red-950/20"
+                        >
                             <div class="min-w-0">
                                 <p class="truncate text-sm font-semibold text-white">
                                     {{ product.name }}
@@ -950,17 +1289,21 @@ function paymentMethodLabel(method: string) {
                                     Tồn kho
                                 </span>
 
-                                <span class="text-sm font-bold"
+                                <span
+                                    class="text-sm font-bold"
                                     :class="product.stock_quantity > 0
                                         ? 'text-green-400'
-                                        : 'text-red-400'">
+                                        : 'text-red-400'"
+                                >
                                     {{ product.stock_quantity }}
                                 </span>
                             </div>
                         </button>
 
-                        <p v-if="filteredManualProducts.length === 0"
-                            class="rounded-lg border border-dashed border-zinc-700 py-10 text-center text-sm text-zinc-500">
+                        <p
+                            v-if="filteredManualProducts.length === 0"
+                            class="rounded-lg border border-dashed border-zinc-700 py-10 text-center text-sm text-zinc-500"
+                        >
                             Không tìm thấy sản phẩm
                         </p>
                     </div>
@@ -972,18 +1315,63 @@ function paymentMethodLabel(method: string) {
                         THÔNG TIN ĐƠN HÀNG
                     </h3>
 
-                    <div class="space-y-2">
-                        <input v-model="manualOrderForm.customer_name"
+                    <div class="space-y-3">
+
+                        <!-- CHỌN MÁY -->
+                        <div>
+                            <label
+                                for="manual-order-pc"
+                                class="mb-1.5 block text-xs font-semibold text-zinc-300"
+                            >
+                                Chọn máy
+                                <span class="font-normal text-zinc-500">
+                                    (không bắt buộc)
+                                </span>
+                            </label>
+
+                            <select
+                                id="manual-order-pc"
+                                v-model="manualOrderForm.pc_id"
+                                class="w-full rounded-lg border border-zinc-700 bg-[#202020] px-3 py-2.5 text-sm text-white focus:border-red-500 focus:outline-none"
+                            >
+                                <option :value="null">
+                                    Không chọn máy
+                                </option>
+
+                                <option
+                                    v-for="pc in pcs"
+                                    :key="pc.id"
+                                    :value="pc.id"
+                                >
+                                    {{ pc.code }}{{ pc.name ? ` - ${pc.name}` : '' }}
+                                </option>
+                            </select>
+
+                            <p
+                                v-if="manualOrderForm.errors.pc_id"
+                                class="mt-1 text-xs text-red-400"
+                            >
+                                {{ manualOrderForm.errors.pc_id }}
+                            </p>
+                        </div>
+
+                        <!-- TÊN KHÁCH HÀNG -->
+                        <input
+                            v-model="manualOrderForm.customer_name"
                             type="text"
                             maxlength="100"
                             placeholder="Tên khách hàng (không bắt buộc)"
-                            class="w-full rounded-lg border border-zinc-700 bg-[#202020] px-3 py-2.5 text-sm text-white placeholder-zinc-500 focus:border-red-500 focus:outline-none" />
+                            class="w-full rounded-lg border border-zinc-700 bg-[#202020] px-3 py-2.5 text-sm text-white placeholder-zinc-500 focus:border-red-500 focus:outline-none"
+                        />
 
-                        <textarea v-model="manualOrderForm.note"
+                        <!-- GHI CHÚ -->
+                        <textarea
+                            v-model="manualOrderForm.note"
                             rows="2"
                             maxlength="1000"
                             placeholder="Ghi chú đơn hàng..."
-                            class="w-full resize-none rounded-lg border border-zinc-700 bg-[#202020] px-3 py-2.5 text-sm text-white placeholder-zinc-500 focus:border-red-500 focus:outline-none" />
+                            class="w-full resize-none rounded-lg border border-zinc-700 bg-[#202020] px-3 py-2.5 text-sm text-white placeholder-zinc-500 focus:border-red-500 focus:outline-none"
+                        />
                     </div>
 
                     <div class="flex items-center justify-between">
@@ -997,10 +1385,11 @@ function paymentMethodLabel(method: string) {
                     </div>
 
                     <div class="max-h-[280px] space-y-2 overflow-y-auto pr-1">
-                        <div v-for="item in manualOrderForm.items"
+                        <div
+                            v-for="item in manualOrderForm.items"
                             :key="item.product_id"
-                            class="rounded-lg border border-zinc-800 bg-[#202020] p-3">
-
+                            class="rounded-lg border border-zinc-800 bg-[#202020] p-3"
+                        >
                             <div class="flex items-start justify-between gap-2">
                                 <div class="min-w-0">
                                     <p class="text-sm font-semibold text-white">
@@ -1012,9 +1401,11 @@ function paymentMethodLabel(method: string) {
                                     </p>
                                 </div>
 
-                                <button type="button"
+                                <button
+                                    type="button"
                                     @click="removeManualProduct(item.product_id)"
-                                    class="shrink-0 text-xs font-semibold text-red-400 hover:text-red-300">
+                                    class="shrink-0 text-xs font-semibold text-red-400 hover:text-red-300"
+                                >
                                     Xóa
                                 </button>
                             </div>
@@ -1024,11 +1415,13 @@ function paymentMethodLabel(method: string) {
                                     Số lượng
                                 </label>
 
-                                <input v-model.number="item.quantity"
+                                <input
+                                    v-model.number="item.quantity"
                                     type="number"
                                     min="1"
                                     max="999"
-                                    class="w-20 rounded-lg border border-zinc-700 bg-[#151515] px-2 py-1.5 text-center text-sm text-white focus:border-red-500 focus:outline-none" />
+                                    class="w-20 rounded-lg border border-zinc-700 bg-[#151515] px-2 py-1.5 text-center text-sm text-white focus:border-red-500 focus:outline-none"
+                                />
 
                                 <span class="ml-auto text-sm font-bold text-white">
                                     {{ formatMoney(
@@ -1038,15 +1431,19 @@ function paymentMethodLabel(method: string) {
                                 </span>
                             </div>
 
-                            <input v-model="item.note"
+                            <input
+                                v-model="item.note"
                                 type="text"
                                 maxlength="255"
                                 placeholder="Ghi chú món..."
-                                class="mt-3 w-full rounded-lg border border-zinc-700 bg-[#151515] px-3 py-2 text-xs text-white placeholder-zinc-500 focus:border-red-500 focus:outline-none" />
+                                class="mt-3 w-full rounded-lg border border-zinc-700 bg-[#151515] px-3 py-2 text-xs text-white placeholder-zinc-500 focus:border-red-500 focus:outline-none"
+                            />
                         </div>
 
-                        <p v-if="manualOrderForm.items.length === 0"
-                            class="rounded-lg border border-dashed border-zinc-700 py-10 text-center text-sm text-zinc-500">
+                        <p
+                            v-if="manualOrderForm.items.length === 0"
+                            class="rounded-lg border border-dashed border-zinc-700 py-10 text-center text-sm text-zinc-500"
+                        >
                             Chưa chọn sản phẩm
                         </p>
                     </div>
@@ -1065,18 +1462,24 @@ function paymentMethodLabel(method: string) {
                     </div>
 
                     <!-- LỖI -->
-                    <div v-if="manualOrderForm.errors.items"
-                        class="rounded-lg border border-red-800 bg-red-950/30 p-3 text-xs text-red-400">
+                    <div
+                        v-if="manualOrderForm.errors.items"
+                        class="rounded-lg border border-red-800 bg-red-950/30 p-3 text-xs text-red-400"
+                    >
                         {{ manualOrderForm.errors.items }}
                     </div>
 
-                    <div v-if="manualOrderForm.errors.customer_name"
-                        class="text-xs text-red-400">
+                    <div
+                        v-if="manualOrderForm.errors.customer_name"
+                        class="text-xs text-red-400"
+                    >
                         {{ manualOrderForm.errors.customer_name }}
                     </div>
 
-                    <div v-if="manualOrderForm.errors.note"
-                        class="text-xs text-red-400">
+                    <div
+                        v-if="manualOrderForm.errors.note"
+                        class="text-xs text-red-400"
+                    >
                         {{ manualOrderForm.errors.note }}
                     </div>
                 </div>
@@ -1084,17 +1487,21 @@ function paymentMethodLabel(method: string) {
 
             <!-- FOOTER MODAL -->
             <div class="flex flex-wrap justify-end gap-2 border-t border-zinc-800 p-4">
-                <button type="button"
+                <button
+                    type="button"
                     @click="closeManualOrderModal"
                     :disabled="manualOrderForm.processing"
-                    class="rounded-lg border border-zinc-700 px-5 py-2.5 text-xs font-semibold text-zinc-300 hover:bg-zinc-800 disabled:opacity-50">
+                    class="rounded-lg border border-zinc-700 px-5 py-2.5 text-xs font-semibold text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+                >
                     HỦY
                 </button>
 
-                <button type="button"
+                <button
+                    type="button"
                     @click="submitManualOrder"
                     :disabled="manualOrderForm.processing || manualOrderForm.items.length === 0"
-                    class="rounded-lg bg-red-600 px-6 py-2.5 text-xs font-bold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50">
+                    class="rounded-lg bg-red-600 px-6 py-2.5 text-xs font-bold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
                     {{ manualOrderForm.processing ? 'ĐANG TẠO...' : 'TẠO ĐƠN HÀNG' }}
                 </button>
             </div>
